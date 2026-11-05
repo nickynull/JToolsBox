@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -10,6 +11,7 @@ permissions:
 
 jobs:
   release_please:
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -23,7 +25,11 @@ jobs:
 
   build_tauri:
     needs: release_please
-    if: needs.release_please.outputs.release_created == 'true'
+    if: |
+      always() && (
+        needs.release_please.outputs.release_created == 'true' ||
+        github.ref_type == 'tag'
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -58,7 +64,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ needs.release_please.outputs.tag_name }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || needs.release_please.outputs.tag_name }}
+          releaseName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
