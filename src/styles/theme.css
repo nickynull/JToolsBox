@@ -1,0 +1,163 @@
+/* Light theme (default) */
+html[data-theme="light"] {
+  --bg-primary: #f3f3f3;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e8e8e8;
+
+  --titlebar-bg: #e8e8e8;
+  --border-color: #d4d4d4;
+
+  --text-primary: #1e1e1e;
+  --text-secondary: #717171;
+
+  --segment-bg: #d9d9d9;
+  --segment-hover-bg: #c9c9c9;
+  --segment-active-bg: #ffffff;
+
+  --win-btn-hover-bg: rgba(0, 0, 0, 0.06);
+
+  --accent: #0078d4;
+  --accent-hover: #106ebe;
+
+  --success: #107c10;
+  --danger: #d13438;
+  --warning: #ca5010;
+  --warning-text: #b58900;
+
+  --input-bg: #ffffff;
+  --input-border: #cecece;
+  --input-focus-border: #0078d4;
+
+  --scrollbar-thumb: #c1c1c1;
+  --scrollbar-track: transparent;
+
+  /* Element Plus 主色色阶的混合基色 */
+  --el-mix-base: #ffffff;
+
+  color-scheme: light;
+}
+
+/* Dark theme */
+html[data-theme="dark"] {
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-tertiary: #2d2d2d;
+
+  --titlebar-bg: #2d2d2d;
+  --border-color: #404040;
+
+  --text-primary: #cccccc;
+  --text-secondary: #8b8b8b;
+
+  --segment-bg: #3c3c3c;
+  --segment-hover-bg: #4a4a4a;
+  --segment-active-bg: #505050;
+
+  --win-btn-hover-bg: rgba(255, 255, 255, 0.06);
+
+  --accent: #0078d4;
+  --accent-hover: #3794ff;
+
+  --success: #6cc644;
+  --danger: #f44747;
+  --warning: #ffaa44;
+  --warning-text: #e8c547;
+
+  --input-bg: #3c3c3c;
+  --input-border: #555555;
+  --input-focus-border: #0078d4;
+
+  --scrollbar-thumb: #555555;
+  --scrollbar-track: transparent;
+
+  /* Element Plus 主色色阶的混合基色 */
+  --el-mix-base: var(--bg-primary);
+
+  color-scheme: dark;
+}
+
+/* Element Plus 主题对接：让组件配色跟随本项目的主题变量 */
+html[data-theme="light"],
+html[data-theme="dark"] {
+  --el-color-primary: var(--accent);
+  --el-color-primary-light-3: color-mix(in srgb, var(--accent) 70%, var(--el-mix-base));
+  --el-color-primary-light-5: color-mix(in srgb, var(--accent) 50%, var(--el-mix-base));
+  --el-color-primary-light-7: color-mix(in srgb, var(--accent) 30%, var(--el-mix-base));
+  --el-color-primary-light-8: color-mix(in srgb, var(--accent) 20%, var(--el-mix-base));
+  --el-color-primary-light-9: color-mix(in srgb, var(--accent) 10%, var(--el-mix-base));
+  --el-color-primary-dark-2: var(--accent-hover);
+  --el-color-success: var(--success);
+  --el-color-warning: var(--warning);
+  --el-color-danger: var(--danger);
+  --el-color-error: var(--danger);
+
+  --el-bg-color: var(--bg-secondary);
+  --el-bg-color-page: var(--bg-primary);
+  --el-bg-color-overlay: var(--bg-secondary);
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-primary);
+  --el-text-color-secondary: var(--text-secondary);
+  --el-border-color: var(--border-color);
+  --el-border-color-light: var(--border-color);
+  --el-border-color-lighter: var(--border-color);
+  --el-fill-color-blank: var(--bg-secondary);
+  --el-fill-color-light: var(--bg-tertiary);
+}
+
+/* 输入类组件自身也声明了 --el-input-*，必须直接命中组件节点才能覆盖默认值 */
+html[data-theme="light"] .el-input,
+html[data-theme="light"] .el-textarea,
+html[data-theme="dark"] .el-input,
+html[data-theme="dark"] .el-textarea {
+  --el-input-bg-color: var(--input-bg);
+  --el-input-border-color: var(--input-border);
+  --el-input-hover-border-color: var(--input-border);
+  --el-input-focus-border-color: var(--input-focus-border);
+  --el-input-icon-color: var(--text-secondary);
+  --el-input-placeholder-color: var(--text-secondary);
+}
+
+html[data-theme="light"] .el-select__wrapper,
+html[data-theme="dark"] .el-select__wrapper {
+  --el-fill-color-blank: var(--input-bg);
+  --el-border-color: var(--input-border);
+}
+
+/* Global styles */
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
