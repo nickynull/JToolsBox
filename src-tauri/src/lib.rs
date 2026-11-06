@@ -82,6 +82,7 @@ struct FileSharingConfigInput {
     shared_folders: Vec<String>,
     token_duration_hours: u64,
     auto_start: Option<bool>,
+    log_retention_days: Option<u64>,
 }
 
 #[tauri::command]
@@ -93,7 +94,7 @@ async fn get_file_sharing_config(state: tauri::State<'_, AppState>) -> Result<Fi
 async fn set_file_sharing_config(
     state: tauri::State<'_, AppState>,
     config: FileSharingConfigInput,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut current = state.file_sharing.config.write().await;
     current.port = config.port;
     current.shared_folders = config.shared_folders;
@@ -101,8 +102,15 @@ async fn set_file_sharing_config(
     if let Some(auto_start) = config.auto_start {
         current.auto_start = auto_start;
     }
+    if let Some(retention) = config.log_retention_days {
+        current.log_retention_days = retention.min(3650);
+    }
+    let retention = current.log_retention_days;
     drop(current);
-    state.file_sharing.save_config().await
+
+    state.file_sharing.save_config().await?;
+    // 保留天数变小后立即清理，返回被自动删除的文件数供界面提示
+    Ok(state.file_sharing.cleanup_logs(retention).len() as u64)
 }
 
 #[tauri::command]
@@ -181,7 +189,7 @@ async fn force_logout_file_sharing_user(
             .add_log(
                 "admin",
                 "force_logout",
-                &format!("Force logout: {} ({} sessions)", username, removed),
+                &format!("强制下线：{}（{} 个会话）", username, removed),
             )
             .await;
     }
@@ -234,7 +242,7 @@ async fn create_file_sharing_user(
     state.file_sharing.save_users().await?;
     state
         .file_sharing
-        .add_log("admin", "create_user", &format!("Created user: {}", input.username))
+        .add_log("admin", "create_user", &format!("新建用户：{}", input.username))
         .await;
 
     Ok(serde_json::json!({
@@ -319,7 +327,7 @@ async fn delete_file_sharing_user(
         .retain(|_, session| session.user_id != id);
     state
         .file_sharing
-        .add_log("admin", "delete_user", &format!("Deleted user: {}", id))
+        .add_log("admin", "delete_user", &format!("删除用户：{}", id))
         .await;
 
     Ok(())
@@ -335,12 +343,41 @@ async fn get_file_sharing_logs(
     Ok(logs.iter().rev().take(limit).cloned().collect())
 }
 
+/// 日志目录里可查看的日期，供桌面端日期下拉使用
+#[tauri::command]
+async fn get_file_sharing_log_dates(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<file_sharing::LogDateInfo>, String> {
+    Ok(state.file_sharing.list_log_dates())
+}
+
+#[tauri::command]
+async fn read_file_sharing_log_date(
+    state: tauri::State<'_, AppState>,
+    date: String,
+    limit: Option<usize>,
+) -> Result<file_sharing::LogPage, String> {
+    state.file_sharing.read_log_page(&date, limit).await
+}
+
+#[tauri::command]
+async fn delete_file_sharing_log_dates(
+    state: tauri::State<'_, AppState>,
+    dates: Vec<String>,
+) -> Result<file_sharing::LogDeleteResult, String> {
+    if dates.is_empty() {
+        return Err("请选择要删除的日志文件".to_string());
+    }
+    Ok(state.file_sharing.delete_logs(&dates).await)
+}
+
 #[derive(Serialize)]
 struct NetworkInterface {
     name: String,
     ip: String,
     label: String,
     connected: bool,
+    recommended: bool,
 }
 
 /// 网卡是否真正接入网络：只有链路本地地址（如 169.254.x.x）视为未连接，
@@ -374,86 +411,189 @@ fn media_connected(_index: u32) -> Option<bool> {
     None
 }
 
+/// 虚拟网卡名称关键字（与接口名小写形式做包含匹配），命中的接口不对外展示。
+/// 覆盖 VMware / VirtualBox / Hyper-V / Docker / WSL / TAP / VPN 隧道等常见虚拟适配器，
+/// 以及 macOS 的 utun、Linux 的 bridge 等系统虚拟接口。
+const VIRTUAL_ADAPTER_KEYWORDS: &[&str] = &[
+    "vmnet", "vmware", "virtualbox", "vbox", "vethernet", "hyper-v", "hyperv",
+    "docker", "wsl", "tap", "tun", "utun", "bridge", "br-", "veth", "virbr",
+    "loopback", "tunnel", "pptp", "l2tp", "zero",
+];
+
+/// 接口名是否为虚拟网卡名称
+fn is_virtual_adapter_name(name_lower: &str) -> bool {
+    VIRTUAL_ADAPTER_KEYWORDS.iter().any(|kw| name_lower.contains(kw))
+}
+
+/// Windows 上以接口类型为兜底判断：PPP、隧道、软件回环均视为虚拟
+#[cfg(windows)]
+fn is_virtual_adapter_type(index: u32) -> bool {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetIfEntry2, MIB_IF_ROW2, IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL,
+    };
+
+    unsafe {
+        let mut row = MIB_IF_ROW2::default();
+        row.InterfaceIndex = index;
+        if GetIfEntry2(&mut row).0 != 0 {
+            return false;
+        }
+        matches!(row.Type, IF_TYPE_PPP | IF_TYPE_SOFTWARE_LOOPBACK | IF_TYPE_TUNNEL)
+    }
+}
+
+#[cfg(not(windows))]
+fn is_virtual_adapter_type(_index: u32) -> bool {
+    false
+}
+
+/// 接口展示标签：优先归一化为 WLAN / 以太网，其余用系统接口名
+fn interface_label(name_lower: &str, raw_name: &str) -> String {
+    if name_lower.contains("wlan")
+        || name_lower.contains("wi-fi")
+        || name_lower.contains("wifi")
+        || name_lower.contains("无线")
+    {
+        "WLAN".to_string()
+    } else if name_lower.contains("ethernet")
+        || name_lower.contains("eth")
+        || name_lower.contains("以太网")
+        || name_lower.contains("本地连接")
+    {
+        "以太网".to_string()
+    } else {
+        raw_name.to_string()
+    }
+}
+
+/// 通过 WMI 查询应展示的网卡连接名集合。
+/// MSFT_NetAdapter.HardwareInterface 是 PowerShell `Get-NetAdapter -Physical` 使用的判定；
+/// 实测比 Win32_NetworkAdapter.PhysicalAdapter 更严格，ZeroTier、节点小宝 NodeBabyLink
+/// (Wintun)、蓝牙 PAN 等驱动自报物理的虚拟网卡在这里均为 False。
+/// 额外放行 InterfaceDescription 为 Wi-Fi Direct Virtual Adapter 的接口：
+/// 开启移动热点时它持有热点网段地址（如 192.168.137.1），关闭时没有可用 IPv4，
+/// 会被 connected 过滤自然隐藏。
+/// 返回 小写连接名 -> 是否热点接口；查询失败返回 None，调用方回退到启发式过滤
+#[cfg(windows)]
+fn query_displayable_adapters() -> Option<std::collections::HashMap<String, bool>> {
+    let wmi_con = wmi::WMIConnection::with_namespace_path("ROOT\\StandardCimv2").ok()?;
+    let rows: Vec<std::collections::HashMap<String, wmi::Variant>> = wmi_con
+        .raw_query("SELECT Name, InterfaceDescription, HardwareInterface FROM MSFT_NetAdapter")
+        .ok()?;
+
+    let mut adapters = std::collections::HashMap::new();
+    for row in rows {
+        let name = match row.get("Name") {
+            Some(wmi::Variant::String(s)) => s.to_lowercase(),
+            _ => continue,
+        };
+        let hardware = matches!(row.get("HardwareInterface"), Some(wmi::Variant::Bool(true)));
+        let hotspot = match row.get("InterfaceDescription") {
+            Some(wmi::Variant::String(s)) => {
+                s.to_lowercase().contains("wi-fi direct virtual adapter")
+            }
+            _ => false,
+        };
+        if hardware {
+            adapters.insert(name, false);
+        } else if hotspot {
+            adapters.insert(name, true);
+        }
+    }
+    (!adapters.is_empty()).then_some(adapters)
+}
+
+/// 以 UDP “连接”（不发包）询问系统访问外网会选用哪个本地源地址，
+/// 即当前默认路由实际使用的网卡，用于标记推荐地址
+fn probe_preferred_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(("8.8.8.8", 53)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) if !v4.is_unspecified() => Some(v4.to_string()),
+        _ => None,
+    }
+}
+
+/// 列出所有物理网卡上的 IPv4 地址（含未连接的接口，由 connected 区分；
+/// Windows 以 WMI HardwareInterface 名单为准，其余平台或 WMI 不可用时退回名称/类型启发式）
 #[tauri::command]
 fn get_network_addresses() -> Vec<NetworkInterface> {
     use network_interface::NetworkInterfaceConfig;
 
-    let mut result = Vec::new();
-    let mut wlan_found = false;
-    let mut eth_found = false;
+    let mut result: Vec<NetworkInterface> = Vec::new();
+
+    #[cfg(windows)]
+    let displayable = query_displayable_adapters();
 
     if let Ok(interfaces) = network_interface::NetworkInterface::show() {
-        // 第一遍：查找 WLAN 和以太网
         for iface in &interfaces {
+            if iface.internal {
+                continue;
+            }
+
+            let name_lower = iface.name.to_lowercase();
+
+            // 网卡准入判定，并识别热点接口；WMI 不可用时退回名称关键字 + 接口类型启发式
+            #[cfg(windows)]
+            let is_hotspot = match displayable.as_ref() {
+                Some(adapters) => match adapters.get(&name_lower) {
+                    Some(&hotspot) => hotspot,
+                    None => continue,
+                },
+                None => {
+                    if is_virtual_adapter_name(&name_lower) || is_virtual_adapter_type(iface.index) {
+                        continue;
+                    }
+                    name_lower.contains("wi-fi direct")
+                }
+            };
+            #[cfg(not(windows))]
+            let is_hotspot: bool = {
+                if is_virtual_adapter_name(&name_lower) || is_virtual_adapter_type(iface.index) {
+                    continue;
+                }
+                false
+            };
+
             for addr in &iface.addr {
                 if let network_interface::Addr::V4(v4) = addr {
-                    if v4.ip.is_loopback() {
+                    if v4.ip.is_loopback() || v4.ip.is_multicast() {
                         continue;
                     }
 
-                    let name_lower = iface.name.to_lowercase();
-
-                    if !wlan_found && (name_lower.contains("wlan") || name_lower.contains("wi-fi") || name_lower.contains("wifi") || name_lower.contains("无线")) {
-                        result.push(NetworkInterface {
-                            name: iface.name.clone(),
-                            ip: v4.ip.to_string(),
-                            label: "WLAN".to_string(),
-                            connected: is_interface_connected(iface.index, &v4.ip),
-                        });
-                        wlan_found = true;
-                    } else if !eth_found && (name_lower.contains("ethernet") || name_lower.contains("eth") || name_lower.contains("以太网") || name_lower.contains("本地连接")) {
-                        result.push(NetworkInterface {
-                            name: iface.name.clone(),
-                            ip: v4.ip.to_string(),
-                            label: "以太网".to_string(),
-                            connected: is_interface_connected(iface.index, &v4.ip),
-                        });
-                        eth_found = true;
+                    let ip = v4.ip.to_string();
+                    if result.iter().any(|r| r.ip == ip) {
+                        continue;
                     }
-                }
-            }
-        }
 
-        // 第二遍：如果没找到 WLAN 或以太网，添加其他非回环接口
-        if !wlan_found || !eth_found {
-            for iface in &interfaces {
-                for addr in &iface.addr {
-                    if let network_interface::Addr::V4(v4) = addr {
-                        if v4.ip.is_loopback() {
-                            continue;
-                        }
-
-                        let ip = v4.ip.to_string();
-
-                        // 跳过已经添加过的 IP
-                        if result.iter().any(|r| r.ip == ip) {
-                            continue;
-                        }
-
-                        let name_lower = iface.name.to_lowercase();
-
-                        // 跳过已识别的 WLAN 和以太网接口
-                        if name_lower.contains("wlan") || name_lower.contains("wi-fi") || name_lower.contains("wifi") || name_lower.contains("无线") {
-                            continue;
-                        }
-                        if name_lower.contains("ethernet") || name_lower.contains("eth") || name_lower.contains("以太网") || name_lower.contains("本地连接") {
-                            continue;
-                        }
-
-                        // 添加其他接口
-                        result.push(NetworkInterface {
-                            name: iface.name.clone(),
-                            ip,
-                            label: iface.name.clone(),
-                            connected: is_interface_connected(iface.index, &v4.ip),
-                        });
-                    }
+                    result.push(NetworkInterface {
+                        name: iface.name.clone(),
+                        label: if is_hotspot {
+                            "热点".to_string()
+                        } else {
+                            interface_label(&name_lower, &iface.name)
+                        },
+                        ip,
+                        connected: is_interface_connected(iface.index, &v4.ip),
+                        recommended: false,
+                    });
                 }
             }
         }
     }
 
-    result.sort_by(|a, b| a.label.cmp(&b.label));
+    if let Some(preferred) = probe_preferred_ip() {
+        if let Some(target) = result.iter_mut().find(|r| r.ip == preferred) {
+            target.recommended = true;
+        }
+    }
+
+    result.sort_by(|a, b| {
+        b.recommended
+            .cmp(&a.recommended)
+            .then_with(|| a.label.cmp(&b.label))
+            .then_with(|| a.ip.cmp(&b.ip))
+    });
     result
 }
 
@@ -533,6 +673,10 @@ pub fn run() {
     rt.block_on(async {
         fs_state.load_config().await;
         fs_state.load_users().await;
+        fs_state.load_logs().await;
+        // 启动时先按保留天数清一次过期日志
+        let retention = fs_state.config.read().await.log_retention_days;
+        fs_state.cleanup_logs(retention);
     });
 
     let fs_state_clone = fs_state.clone();
@@ -561,6 +705,9 @@ pub fn run() {
             update_file_sharing_user,
             delete_file_sharing_user,
             get_file_sharing_logs,
+            get_file_sharing_log_dates,
+            read_file_sharing_log_date,
+            delete_file_sharing_log_dates,
             get_network_addresses,
         ])
         .on_window_event(|window, event| {
@@ -608,6 +755,18 @@ pub fn run() {
                 };
                 if should_start {
                     let _ = fs_server::start_server(fs_state.clone()).await;
+                }
+            });
+
+            // 跨天长时间运行时定时清理过期日志，启动阶段已经清过一次，这里跳过首拍
+            let cleanup_state = fs_state_clone.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let retention = cleanup_state.config.read().await.log_retention_days;
+                    cleanup_state.cleanup_logs(retention);
                 }
             });
 

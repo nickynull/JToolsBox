@@ -48,6 +48,7 @@ const files = ref<FileEntry[]>([]);
 const loading = ref(false);
 const statusLoading = ref(false);
 const search = ref("");
+const sortBy = ref("name-asc");
 const uploadTasks = ref<UploadTask[]>([]);
 const previewTarget = ref<FileEntry | null>(null);
 const previewVisible = ref(false);
@@ -64,6 +65,32 @@ const filteredFiles = computed(() => {
   const keyword = search.value.trim().toLowerCase();
   if (!keyword) return files.value;
   return files.value.filter((entry) => entry.name.toLowerCase().includes(keyword));
+});
+
+const sortedFiles = computed(() => {
+  const list = [...filteredFiles.value];
+  const dirs = list.filter((e) => e.is_dir);
+  const nonDirs = list.filter((e) => !e.is_dir);
+  const [field, order] = sortBy.value.split("-") as [string, "asc" | "desc"];
+  const cmp = (a: FileEntry, b: FileEntry) => {
+    let result = 0;
+    switch (field) {
+      case "size":
+        result = a.size - b.size;
+        break;
+      case "modified":
+        result = new Date(a.modified).getTime() - new Date(b.modified).getTime();
+        break;
+      case "name":
+      default:
+        result = a.name.localeCompare(b.name, "zh-CN");
+        break;
+    }
+    return order === "desc" ? -result : result;
+  };
+  dirs.sort(cmp);
+  nonDirs.sort(cmp);
+  return [...dirs, ...nonDirs];
 });
 
 const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico", "avif"];
@@ -388,44 +415,6 @@ onMounted(loadStatus);
       class="folder-alert"
     />
 
-    <div class="toolbar">
-      <el-select
-        :model-value="folderIndex"
-        :disabled="!hasFolder"
-        :loading="statusLoading"
-        class="folder-select"
-        placeholder="选择共享目录"
-        @change="switchFolder"
-      >
-        <el-option v-for="(folder, index) in folders" :key="folder" :label="folder" :value="index" />
-      </el-select>
-
-      <el-breadcrumb separator="/" class="toolbar-grow">
-        <el-breadcrumb-item>
-          <a class="crumb" @click="navigateTo('')">根目录</a>
-        </el-breadcrumb-item>
-        <el-breadcrumb-item v-for="(part, index) in breadcrumbs" :key="index">
-          <a
-            v-if="index < breadcrumbs.length - 1"
-            class="crumb"
-            @click="navigateTo(breadcrumbs.slice(0, index + 1).join('/'))"
-          >
-            {{ part }}
-          </a>
-          <span v-else class="crumb-current">{{ part }}</span>
-        </el-breadcrumb-item>
-      </el-breadcrumb>
-
-      <el-input
-        v-model="search"
-        :prefix-icon="Search"
-        placeholder="搜索当前目录"
-        clearable
-        class="search-input"
-      />
-      <el-button :icon="Refresh" :loading="loading" :disabled="!hasFolder" @click="refresh">刷新</el-button>
-    </div>
-
     <el-upload
       v-if="hasFolder"
       drag
@@ -442,6 +431,59 @@ onMounted(loadStatus);
         </div>
       </template>
     </el-upload>
+
+    <div class="toolbar">
+      <div class="folder-row">
+        <el-select
+          :model-value="folderIndex"
+          :disabled="!hasFolder"
+          :loading="statusLoading"
+          class="folder-select"
+          placeholder="选择共享目录"
+          @change="switchFolder"
+        >
+          <el-option v-for="(folder, index) in folders" :key="folder" :label="folder" :value="index" />
+        </el-select>
+        <el-button :icon="Refresh" :loading="loading" :disabled="!hasFolder" @click="refresh">刷新</el-button>
+      </div>
+
+      <div class="breadcrumb-row">
+        <el-breadcrumb separator="/" class="toolbar-grow">
+          <el-breadcrumb-item>
+            <a class="crumb" @click="navigateTo('')">根目录</a>
+          </el-breadcrumb-item>
+          <el-breadcrumb-item v-for="(part, index) in breadcrumbs" :key="index">
+            <a
+              v-if="index < breadcrumbs.length - 1"
+              class="crumb"
+              @click="navigateTo(breadcrumbs.slice(0, index + 1).join('/'))"
+            >
+              {{ part }}
+            </a>
+            <span v-else class="crumb-current">{{ part }}</span>
+          </el-breadcrumb-item>
+        </el-breadcrumb>
+      </div>
+
+      <div class="toolbar-actions">
+        <el-select v-model="sortBy" class="sort-select" placeholder="排序方式">
+          <el-option label="按名称升序" value="name-asc" />
+          <el-option label="按名称降序" value="name-desc" />
+          <el-option label="按大小升序" value="size-asc" />
+          <el-option label="按大小降序" value="size-desc" />
+          <el-option label="按时间升序" value="modified-asc" />
+          <el-option label="按时间降序" value="modified-desc" />
+        </el-select>
+
+        <el-input
+          v-model="search"
+          :prefix-icon="Search"
+          placeholder="搜索当前目录"
+          clearable
+          class="search-input"
+        />
+      </div>
+    </div>
 
     <div v-if="uploadTasks.length" class="upload-tasks">
       <div v-for="task in uploadTasks" :key="task.id" class="upload-task">
@@ -492,15 +534,16 @@ onMounted(loadStatus);
     </div>
 
     <div class="file-table-wrap">
+      <!-- Desktop table view -->
       <el-table
         v-loading="loading || statusLoading"
-        :data="filteredFiles"
+        :data="sortedFiles"
         row-key="path"
         size="default"
-        class="file-table"
+        class="file-table desktop-table"
         @row-dblclick="openEntry"
       >
-        <el-table-column label="名称" prop="name" min-width="260" sortable>
+        <el-table-column label="名称" prop="name" min-width="260">
           <template #default="{ row }">
             <div class="name-cell">
               <el-icon class="name-icon"><component :is="iconFor(row)" /></el-icon>
@@ -510,13 +553,13 @@ onMounted(loadStatus);
           </template>
         </el-table-column>
 
-        <el-table-column label="大小" prop="size" width="120" sortable align="right">
+        <el-table-column label="大小" prop="size" width="120" align="right">
           <template #default="{ row }">
             <span class="dim">{{ row.is_dir ? "-" : formatSize(row.size) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="修改时间" prop="modified" width="180" sortable>
+        <el-table-column label="修改时间" prop="modified" width="180">
           <template #default="{ row }">
             <span class="dim mono">{{ formatTime(row.modified) }}</span>
           </template>
@@ -563,6 +606,67 @@ onMounted(loadStatus);
           />
         </template>
       </el-table>
+
+      <!-- Mobile list view -->
+      <div v-loading="loading || statusLoading" class="mobile-file-list">
+        <div v-if="sortedFiles.length === 0 && !loading && !statusLoading" class="mobile-empty">
+          {{ search ? '没有匹配的文件' : '当前目录为空，拖拽文件即可上传' }}
+        </div>
+        <div
+          v-for="entry in sortedFiles"
+          :key="entry.path"
+          class="mobile-file-item"
+          @click="openEntry(entry)"
+        >
+          <div class="mobile-file-icon">
+            <el-icon :size="20"><component :is="iconFor(entry)" /></el-icon>
+          </div>
+          <div class="mobile-file-info">
+            <div class="mobile-file-name">{{ entry.name }}</div>
+            <div class="mobile-file-meta">
+              <span v-if="!entry.is_dir">{{ formatSize(entry.size) }}</span>
+              <span v-if="!entry.is_dir" class="meta-sep">·</span>
+              <span>{{ formatTime(entry.modified) }}</span>
+            </div>
+          </div>
+          <div class="mobile-file-actions" @click.stop>
+            <el-button
+              v-if="!entry.is_dir && previewKind(entry.name) !== 'none'"
+              link
+              type="primary"
+              size="small"
+              @click="openPreview(entry)"
+            >
+              预览
+            </el-button>
+            <el-button
+              v-if="!entry.is_dir"
+              link
+              size="small"
+              @click="download(entry)"
+            >
+              下载
+            </el-button>
+            <el-tooltip
+              :disabled="isAdmin"
+              content="仅管理员可删除文件"
+              placement="top"
+            >
+              <span class="tip-wrap">
+                <el-button
+                  link
+                  type="danger"
+                  size="small"
+                  :disabled="!isAdmin"
+                  @click="remove(entry)"
+                >
+                  删除
+                </el-button>
+              </span>
+            </el-tooltip>
+          </div>
+        </div>
+      </div>
     </div>
 
     <PreviewDialog
@@ -592,6 +696,13 @@ onMounted(loadStatus);
   max-width: 100%;
 }
 
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
 .search-input {
   width: 220px;
 }
@@ -610,8 +721,56 @@ onMounted(loadStatus);
   color: var(--fs-text);
 }
 
+.breadcrumb-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.toolbar-grow {
+  flex: 1;
+  min-width: 120px;
+}
+
+.sort-select {
+  width: 140px;
+  flex-shrink: 0;
+}
+
 .uploader :deep(.el-upload-dragger) {
   padding: 22px 16px;
+}
+
+.uploader {
+  border-radius: 8px;
+}
+
+.uploader :deep(.el-upload-dragger) {
+  border-radius: 8px;
+}
+
+/* Responsive: mobile */
+@media (max-width: 640px) {
+  .uploader :deep(.el-upload-dragger) {
+    padding: 14px 10px;
+  }
+
+  .uploader :deep(.el-icon--upload) {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+
+  .uploader :deep(.el-upload__text) {
+    font-size: 13px;
+  }
+
+  .uploader :deep(.el-upload__tip) {
+    font-size: 11px;
+    padding: 0 8px;
+  }
 }
 
 .upload-tasks {
@@ -734,5 +893,153 @@ onMounted(loadStatus);
   align-items: center;
   gap: 2px;
   flex-wrap: wrap;
+}
+
+/* Mobile list view */
+.mobile-file-list {
+  display: none;
+}
+
+.mobile-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--fs-text-secondary);
+  font-size: 14px;
+}
+
+.mobile-file-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--fs-border);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.mobile-file-item:last-child {
+  border-bottom: none;
+}
+
+.mobile-file-item:active {
+  background: var(--fs-bg);
+}
+
+.mobile-file-icon {
+  flex-shrink: 0;
+  color: var(--fs-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mobile-file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-file-name {
+  font-size: 14px;
+  color: var(--fs-text);
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.mobile-file-meta {
+  font-size: 12px;
+  color: var(--fs-text-secondary);
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.meta-sep {
+  color: var(--fs-text-secondary);
+  opacity: 0.5;
+}
+
+.mobile-file-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.mobile-file-actions .el-button {
+  font-size: 13px;
+  padding: 4px 6px;
+}
+
+/* Responsive: mobile */
+@media (max-width: 640px) {
+  .desktop-table {
+    display: none;
+  }
+
+  .mobile-file-list {
+    display: block;
+  }
+
+  .folder-select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .toolbar {
+    gap: 8px;
+  }
+
+  .breadcrumb-row {
+    width: 100%;
+  }
+
+  .toolbar-actions {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .sort-select {
+    width: 130px;
+  }
+
+  .search-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .mobile-file-item {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .mobile-file-name {
+    font-size: 14px;
+  }
+
+  .mobile-file-meta {
+    font-size: calc(14px * 0.8);
+  }
+
+  .mobile-file-actions {
+    gap: 0;
+  }
+
+  .mobile-file-actions .el-button {
+    padding: 4px 4px;
+    font-size: 12px;
+  }
+}
+
+/* Responsive: desktop - hide mobile list */
+@media (min-width: 641px) {
+  .mobile-file-list {
+    display: none;
+  }
+
+  .desktop-table {
+    display: table;
+  }
 }
 </style>

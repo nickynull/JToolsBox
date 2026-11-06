@@ -36,7 +36,11 @@ urlencoding = "2"
 get_if_addrs = "0.5"
 network-interface = "2"
 
+[dev-dependencies]
+tower = "0.5"
+
 [target.'cfg(windows)'.dependencies]
+wmi = { version = "0.18", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
@@ -46,7 +50,7 @@ windows = { version = "0.62", features = [
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1
-lto = true
+lto = "thin"
 opt-level = 3
 panic = "abort"
 strip = true

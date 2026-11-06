@@ -92,6 +92,11 @@ body {
   white-space: nowrap;
 }
 
+.user-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .app-body {
   flex: 1;
   min-height: 0;
@@ -127,6 +132,13 @@ body {
 .toolbar-grow {
   flex: 1;
   min-width: 120px;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .mono {
@@ -176,19 +188,33 @@ body {
 
 @media (max-width: 640px) {
   .app-header {
-    padding: 0 12px;
+    padding: 0 10px;
+    gap: 8px;
   }
 
   .app-body {
-    padding: 0 10px 10px;
+    padding: 0 8px 8px;
   }
 
   .panel {
     padding: 12px;
   }
 
-  .user-chip span {
+  .user-chip {
+    max-width: none;
+  }
+
+  .user-chip .el-icon {
     display: none;
+  }
+
+  .logout-btn span:not(.el-icon) {
+    display: none;
+  }
+
+  .logout-btn {
+    padding: 8px;
+    min-height: unset;
   }
 }
 

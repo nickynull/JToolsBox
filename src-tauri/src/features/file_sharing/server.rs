@@ -45,6 +45,8 @@ pub fn create_router(state: Arc<FileSharingState>) -> Router {
         .route("/users/kick", post(kick_user))
         .route("/logout", post(logout))
         .route("/logs", get(get_logs))
+        .route("/logs/dates", get(get_log_dates))
+        .route("/logs/date", get(get_log_date))
         .route("/server/status", get(server_status))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -159,7 +161,7 @@ async fn login(
     let user = match user {
         Some(u) => u.clone(),
         None => {
-            state.add_log(&req.username, "login_failed", "User not found").await;
+            state.add_log(&req.username, "login_failed", "账号不存在").await;
             return (StatusCode::UNAUTHORIZED, err_response("用户名或密码错误")).into_response();
         }
     };
@@ -167,7 +169,7 @@ async fn login(
     match verify_password(&req.password, &user.password_hash) {
         Ok(true) => {}
         _ => {
-            state.add_log(&req.username, "login_failed", "Wrong password").await;
+            state.add_log(&req.username, "login_failed", "密码错误").await;
             return (StatusCode::UNAUTHORIZED, err_response("用户名或密码错误")).into_response();
         }
     }
@@ -194,7 +196,7 @@ async fn login(
             );
             drop(sessions);
 
-            state.add_log(&user.username, "login", "Login successful").await;
+            state.add_log(&user.username, "login", "登录成功").await;
             (StatusCode::OK, ok_response(LoginResponse {
                 token,
                 username: user.username,
@@ -212,8 +214,8 @@ async fn logout(
     claims: axum::Extension<Claims>,
 ) -> Response {
     state.sessions.lock().await.remove(&claims.jti);
-    state.add_log(&claims.username, "logout", "Logout").await;
-    ok_response("Logged out").into_response()
+    state.add_log(&claims.username, "logout", "退出登录").await;
+    ok_response("已退出登录").into_response()
 }
 
 #[derive(Deserialize)]
@@ -232,7 +234,7 @@ async fn list_files(
 
     let folder_index = query.folder_index.unwrap_or(0);
     if folder_index >= folders.len() {
-        return (StatusCode::BAD_REQUEST, err_response("Invalid folder index")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("共享目录索引无效")).into_response();
     }
 
     let base_folder = &folders[folder_index];
@@ -254,7 +256,7 @@ async fn list_files(
     };
 
     if !canonical_target.starts_with(&canonical_base) {
-        return (StatusCode::FORBIDDEN, err_response("Path traversal not allowed")).into_response();
+        return (StatusCode::FORBIDDEN, err_response("禁止访问共享目录之外的路径")).into_response();
     }
 
     let mut files = Vec::new();
@@ -325,7 +327,7 @@ async fn resolve_file_path(state: &FileSharingState, folder_index: usize, relati
     drop(config);
 
     if folder_index >= folders.len() {
-        return Err("Invalid folder index".to_string());
+        return Err("共享目录索引无效".to_string());
     }
 
     let base_folder = &folders[folder_index];
@@ -334,7 +336,7 @@ async fn resolve_file_path(state: &FileSharingState, folder_index: usize, relati
     let canonical_target = target.canonicalize().map_err(|e| e.to_string())?;
 
     if !canonical_target.starts_with(&canonical_base) {
-        return Err("Path traversal not allowed".to_string());
+        return Err("禁止访问共享目录之外的路径".to_string());
     }
 
     Ok(canonical_target)
@@ -353,7 +355,7 @@ async fn download_file(
     };
 
     if !file_path.is_file() {
-        return (StatusCode::NOT_FOUND, err_response("File not found")).into_response();
+        return (StatusCode::NOT_FOUND, err_response("文件不存在")).into_response();
     }
 
     let file_name = file_path
@@ -361,7 +363,7 @@ async fn download_file(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "download".to_string());
 
-    state.add_log(&claims.username, "download", &format!("Downloaded: {}", query.path)).await;
+    state.add_log(&claims.username, "download", &format!("下载：{}", query.path)).await;
 
     let encoded_name = urlencoding::encode(&file_name);
     let disposition = format!("attachment; filename*=UTF-8''{}", encoded_name);
@@ -380,7 +382,7 @@ async fn preview_file(
     };
 
     if !file_path.is_file() {
-        return (StatusCode::NOT_FOUND, err_response("File not found")).into_response();
+        return (StatusCode::NOT_FOUND, err_response("文件不存在")).into_response();
     }
 
     let insecure_ext = file_path
@@ -490,7 +492,7 @@ async fn stream_file(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, err_response(&e.to_string())).into_response(),
     };
     if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, err_response("Seek failed")).into_response();
+        return (StatusCode::INTERNAL_SERVER_ERROR, err_response("读取文件位置失败")).into_response();
     }
 
     let stream = ReaderStream::new(file.take(length));
@@ -519,7 +521,7 @@ async fn delete_file(
     };
 
     if !file_path.exists() {
-        return (StatusCode::NOT_FOUND, err_response("File not found")).into_response();
+        return (StatusCode::NOT_FOUND, err_response("文件不存在")).into_response();
     }
 
     let result = if file_path.is_dir() {
@@ -530,8 +532,8 @@ async fn delete_file(
 
     match result {
         Ok(_) => {
-            state.add_log(&claims.username, "delete", &format!("Deleted: {}", req.path)).await;
-            (StatusCode::OK, ok_response("File deleted")).into_response()
+            state.add_log(&claims.username, "delete", &format!("删除：{}", req.path)).await;
+            (StatusCode::OK, ok_response("文件已删除")).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_response(&e.to_string())).into_response(),
     }
@@ -565,7 +567,7 @@ async fn resolve_upload_dir(
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), Response> {
     let folders = state.config.read().await.shared_folders.clone();
     if folder_index >= folders.len() {
-        return Err((StatusCode::BAD_REQUEST, err_response("Invalid folder index")).into_response());
+        return Err((StatusCode::BAD_REQUEST, err_response("共享目录索引无效")).into_response());
     }
 
     let canonical_base = std::fs::canonicalize(&folders[folder_index])
@@ -584,7 +586,7 @@ async fn resolve_upload_dir(
         .canonicalize()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, err_response(&e.to_string())).into_response())?;
     if !canonical_target.starts_with(&canonical_base) {
-        return Err((StatusCode::FORBIDDEN, err_response("Path traversal not allowed")).into_response());
+        return Err((StatusCode::FORBIDDEN, err_response("禁止访问共享目录之外的路径")).into_response());
     }
 
     Ok((canonical_base, canonical_target))
@@ -619,10 +621,10 @@ async fn upload_start(
     Json(req): Json<UploadStartRequest>,
 ) -> Response {
     let Some(upload_id) = sanitize_upload_id(&req.upload_id) else {
-        return (StatusCode::BAD_REQUEST, err_response("Invalid upload id")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("上传会话无效")).into_response();
     };
     let Some(file_name) = sanitize_file_name(&req.name) else {
-        return (StatusCode::BAD_REQUEST, err_response("Invalid file name")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("文件名无效")).into_response();
     };
 
     let (_, dir) = match resolve_upload_dir(
@@ -703,10 +705,10 @@ async fn upload_chunk(
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
     let Some(upload_id) = sanitize_upload_id(&query.upload_id) else {
-        return (StatusCode::BAD_REQUEST, err_response("Invalid upload id")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("上传会话无效")).into_response();
     };
     if body.is_empty() {
-        return (StatusCode::BAD_REQUEST, err_response("Empty chunk")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("上传数据分片为空")).into_response();
     }
 
     // 只接受已通过 upload_start 占位的会话，避免绕过同名检查写入
@@ -765,10 +767,10 @@ async fn upload_complete(
     Json(req): Json<UploadCompleteRequest>,
 ) -> Response {
     let Some(upload_id) = sanitize_upload_id(&req.upload_id) else {
-        return (StatusCode::BAD_REQUEST, err_response("Invalid upload id")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("上传会话无效")).into_response();
     };
     let Some(file_name) = sanitize_file_name(&req.name) else {
-        return (StatusCode::BAD_REQUEST, err_response("Invalid file name")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("文件名无效")).into_response();
     };
 
     let reservation = {
@@ -849,7 +851,7 @@ async fn upload_complete(
     state.add_log(
         &claims.username,
         "upload",
-        &format!("Uploaded: {} ({} bytes)", display_path, req.size),
+        &format!("上传：{}（{} 字节）", display_path, req.size),
     )
     .await;
 
@@ -874,7 +876,7 @@ async fn upload_cancel(
     Json(req): Json<UploadCancelRequest>,
 ) -> Response {
     let Some(upload_id) = sanitize_upload_id(&req.upload_id) else {
-        return (StatusCode::BAD_REQUEST, err_response("Invalid upload id")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("上传会话无效")).into_response();
     };
 
     let (_, dir) = match resolve_upload_dir(
@@ -905,7 +907,7 @@ async fn upload_cancel(
     for path in temp_paths {
         let _ = tokio::fs::remove_file(&path).await;
     }
-    ok_response("Upload cancelled").into_response()
+    ok_response("上传已取消").into_response()
 }
 
 async fn list_users(
@@ -913,7 +915,7 @@ async fn list_users(
     claims: axum::Extension<Claims>,
 ) -> impl IntoResponse {
     if claims.role != "admin" {
-        return (StatusCode::FORBIDDEN, err_response("Admin access required")).into_response();
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
     }
 
     let users = state.users.read().await;
@@ -964,7 +966,7 @@ async fn kick_user(
     Json(req): Json<KickUserRequest>,
 ) -> Response {
     if claims.role != "admin" {
-        return (StatusCode::FORBIDDEN, err_response("Admin access required")).into_response();
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
     }
     if req.username == claims.username {
         return (StatusCode::BAD_REQUEST, err_response("不能强制下线当前登录账号")).into_response();
@@ -982,7 +984,7 @@ async fn kick_user(
             .add_log(
                 &claims.username,
                 "force_logout",
-                &format!("Force logout: {} ({} sessions)", req.username, removed),
+                &format!("强制下线：{}（{} 个会话）", req.username, removed),
             )
             .await;
     }
@@ -1003,16 +1005,16 @@ async fn create_user(
     Json(req): Json<CreateUserRequest>,
 ) -> impl IntoResponse {
     if claims.role != "admin" {
-        return (StatusCode::FORBIDDEN, err_response("Admin access required")).into_response();
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
     }
 
     if req.username.is_empty() || req.password.is_empty() {
-        return (StatusCode::BAD_REQUEST, err_response("Username and password required")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("用户名和密码不能为空")).into_response();
     }
 
     let mut users = state.users.write().await;
     if users.iter().any(|u| u.username == req.username) {
-        return (StatusCode::CONFLICT, err_response("Username already exists")).into_response();
+        return (StatusCode::CONFLICT, err_response("用户名已存在")).into_response();
     }
 
     let password_hash = match hash_password(&req.password) {
@@ -1035,7 +1037,7 @@ async fn create_user(
         return (StatusCode::INTERNAL_SERVER_ERROR, err_response(&e)).into_response();
     }
 
-    state.add_log(&claims.username, "create_user", &format!("Created user: {}", req.username)).await;
+    state.add_log(&claims.username, "create_user", &format!("新建用户：{}", req.username)).await;
 
     (StatusCode::CREATED, ok_response(serde_json::json!({
         "id": user.id,
@@ -1059,13 +1061,13 @@ async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> impl IntoResponse {
     if claims.role != "admin" {
-        return (StatusCode::FORBIDDEN, err_response("Admin access required")).into_response();
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
     }
 
     let mut users = state.users.write().await;
     let user = match users.iter_mut().find(|u| u.id == req.id) {
         Some(u) => u,
-        None => return (StatusCode::NOT_FOUND, err_response("User not found")).into_response(),
+        None => return (StatusCode::NOT_FOUND, err_response("用户名不存在")).into_response(),
     };
 
     if let Some(username) = req.username {
@@ -1102,9 +1104,9 @@ async fn update_user(
         .await
         .retain(|_, session| session.user_id != req.id);
 
-    state.add_log(&claims.username, "update_user", &format!("Updated user: {}", req.id)).await;
+    state.add_log(&claims.username, "update_user", &format!("修改用户：{}", req.id)).await;
 
-    (StatusCode::OK, ok_response("User updated")).into_response()
+    (StatusCode::OK, ok_response("用户信息已更新")).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1118,11 +1120,11 @@ async fn delete_user(
     Json(req): Json<DeleteUserRequest>,
 ) -> impl IntoResponse {
     if claims.role != "admin" {
-        return (StatusCode::FORBIDDEN, err_response("Admin access required")).into_response();
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
     }
 
     if req.id == claims.sub {
-        return (StatusCode::BAD_REQUEST, err_response("Cannot delete yourself")).into_response();
+        return (StatusCode::BAD_REQUEST, err_response("不能删除当前登录的账号")).into_response();
     }
 
     let mut users = state.users.write().await;
@@ -1130,7 +1132,7 @@ async fn delete_user(
     users.retain(|u| u.id != req.id);
 
     if users.len() == before_len {
-        return (StatusCode::NOT_FOUND, err_response("User not found")).into_response();
+        return (StatusCode::NOT_FOUND, err_response("用户名不存在")).into_response();
     }
 
     drop(users);
@@ -1145,9 +1147,9 @@ async fn delete_user(
         .await
         .retain(|_, session| session.user_id != req.id);
 
-    state.add_log(&claims.username, "delete_user", &format!("Deleted user: {}", req.id)).await;
+    state.add_log(&claims.username, "delete_user", &format!("删除用户：{}", req.id)).await;
 
-    (StatusCode::OK, ok_response("User deleted")).into_response()
+    (StatusCode::OK, ok_response("用户已删除")).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1161,7 +1163,7 @@ async fn get_logs(
     Query(query): Query<LogsQuery>,
 ) -> impl IntoResponse {
     if claims.role != "admin" {
-        return (StatusCode::FORBIDDEN, err_response("Admin access required")).into_response();
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
     }
 
     let limit = query.limit.unwrap_or(100).min(1000);
@@ -1169,6 +1171,40 @@ async fn get_logs(
     let entries: Vec<_> = logs.iter().rev().take(limit).collect();
 
     (StatusCode::OK, ok_response(entries)).into_response()
+}
+
+/// 日志目录里可查看的日期
+async fn get_log_dates(
+    State(state): State<Arc<FileSharingState>>,
+    claims: axum::Extension<Claims>,
+) -> impl IntoResponse {
+    if claims.role != "admin" {
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
+    }
+
+    ok_response(state.list_log_dates()).into_response()
+}
+
+#[derive(Deserialize)]
+struct LogDateQuery {
+    date: String,
+    limit: Option<usize>,
+}
+
+/// 读取指定日期的日志文件，历史日期不经过内存缓冲
+async fn get_log_date(
+    State(state): State<Arc<FileSharingState>>,
+    claims: axum::Extension<Claims>,
+    Query(query): Query<LogDateQuery>,
+) -> impl IntoResponse {
+    if claims.role != "admin" {
+        return (StatusCode::FORBIDDEN, err_response("需要管理员权限")).into_response();
+    }
+
+    match state.read_log_page(&query.date, query.limit).await {
+        Ok(page) => (StatusCode::OK, ok_response(page)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, err_response(&e)).into_response(),
+    }
 }
 
 async fn server_status(
@@ -1194,7 +1230,7 @@ pub async fn start_server(fs_state: Arc<FileSharingState>) -> Result<u16, String
     {
         let status = fs_state.status.read().await;
         if status.running {
-            return Err("Server is already running".to_string());
+            return Err("分享服务已在运行中".to_string());
         }
     }
 
@@ -1202,7 +1238,7 @@ pub async fn start_server(fs_state: Arc<FileSharingState>) -> Result<u16, String
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
-        .map_err(|e| format!("Failed to bind port {}: {}", port, e))?;
+        .map_err(|e| format!("端口 {} 绑定失败：{}", port, e))?;
 
     let actual_port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
@@ -1242,7 +1278,7 @@ pub async fn start_server(fs_state: Arc<FileSharingState>) -> Result<u16, String
         status.url = None;
     });
 
-    fs_state.add_log("system", "server_start", &format!("Server started on port {}", actual_port)).await;
+    fs_state.add_log("system", "server_start", &format!("服务已启动，监听端口 {}", actual_port)).await;
 
     Ok(actual_port)
 }
@@ -1255,10 +1291,10 @@ pub async fn stop_server(fs_state: Arc<FileSharingState>) -> Result<(), String> 
 
     if let Some(tx) = shutdown_tx {
         let _ = tx.send(());
-        fs_state.add_log("system", "server_stop", "Server stopped").await;
+        fs_state.add_log("system", "server_stop", "服务已停止").await;
         Ok(())
     } else {
-        Err("Server is not running".to_string())
+        Err("分享服务未启动".to_string())
     }
 }
 
@@ -1284,4 +1320,125 @@ async fn serve_favicon() -> Response {
 async fn serve_asset(AxumPath(path): AxumPath<String>) -> Response {
     WEB_APP.asset_response(&format!("/assets/{}", path))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::file_sharing::{auth::create_token, create_shared_state, LogEntry, SessionInfo};
+    use tower::ServiceExt;
+
+    fn sample_line(user: &str, action: &str, detail: &str) -> String {
+        serde_json::to_string(&LogEntry {
+            timestamp: "2020-03-03T10:00:00+08:00".to_string(),
+            user: user.to_string(),
+            action: action.to_string(),
+            detail: detail.to_string(),
+        })
+        .unwrap()
+    }
+
+    async fn session(state: &FileSharingState, username: &str, role: &str) -> String {
+        let secret = state.config.read().await.jwt_secret.clone();
+        let (token, jti) = create_token("user-id", username, role, &secret, 1).unwrap();
+        let now = Instant::now();
+        state.sessions.lock().await.insert(
+            jti,
+            SessionInfo {
+                user_id: "user-id".to_string(),
+                username: username.to_string(),
+                created_at: chrono::Local::now().to_rfc3339(),
+                expires_at: now + Duration::from_secs(3600),
+                last_active: now,
+            },
+        );
+        token
+    }
+
+    async fn get(app: Router, path: &str, token: Option<&str>) -> (StatusCode, serde_json::Value) {
+        let mut builder = axum::http::Request::builder().method("GET").uri(path);
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {}", token));
+        }
+        let response = app.oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap_or_default();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn log_date_endpoints_gate_by_role_and_return_pages() {
+        let dir = std::env::temp_dir().join(format!("jtoolsbox-log-api-{}", uuid::Uuid::new_v4()));
+        let state = create_shared_state(dir.clone());
+        std::fs::write(
+            state.logs_dir().join("2020-03-03.jsonl"),
+            format!(
+                "{}\n{}\n",
+                sample_line("system", "server_start", "服务已启动，监听端口 9898"),
+                sample_line("jimmy", "upload", "上传：a.txt（12 字节）"),
+            ),
+        )
+        .unwrap();
+
+        let app = create_router(state.clone());
+
+        // 未登录时中间件直接拦下
+        let (status, _) = get(app.clone(), "/api/logs/dates", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // 普通用户看不到日志
+        let user_token = session(&state, "bob", "user").await;
+        let (status, body) = get(app.clone(), "/api/logs/dates", Some(&user_token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "需要管理员权限");
+
+        let admin_token = session(&state, "root", "admin").await;
+
+        let (status, body) = get(app.clone(), "/api/logs/dates", Some(&admin_token)).await;
+        assert_eq!(status, StatusCode::OK);
+        let dates: Vec<String> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["date"].as_str().unwrap().to_string())
+            .collect();
+        assert!(dates.contains(&"2020-03-03".to_string()));
+
+        let (status, body) = get(
+            app.clone(),
+            "/api/logs/date?date=2020-03-03&limit=10",
+            Some(&admin_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["parsed"], 2);
+        assert_eq!(body["data"]["tail_only"], false);
+        // 最新在前，与桌面端一致
+        assert_eq!(body["data"]["entries"][0]["detail"], "上传：a.txt（12 字节）");
+
+        // 非法日期返回中文错误，不会去读目录外的文件
+        let (status, body) = get(
+            app.clone(),
+            "/api/logs/date?date=../../windows/system32/config",
+            Some(&admin_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "日期格式不正确");
+
+        // 该日期没有文件时是空页而不是报错
+        let (status, body) = get(
+            app.clone(),
+            "/api/logs/date?date=2020-04-04",
+            Some(&admin_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["entries"].as_array().unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 

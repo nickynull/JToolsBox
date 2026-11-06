@@ -2,7 +2,8 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { ElMessageBox } from 'element-plus'
-import { Delete, CopyDocument, Folder, FolderOpened } from '@element-plus/icons-vue'
+import { Delete, CopyDocument, Folder, FolderOpened, Link, Search } from '@element-plus/icons-vue'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { notify } from '../composables/useNotify'
 import QRCode from 'qrcode'
 import {
@@ -17,16 +18,19 @@ import {
   createFileSharingUser,
   updateFileSharingUser,
   deleteFileSharingUser,
-  getFileSharingLogs,
+  getFileSharingLogDates,
+  readFileSharingLogDate,
+  deleteFileSharingLogDates,
   getNetworkAddresses,
   type FileSharingConfig,
   type FileSharingStatus,
   type FileSharingUser,
+  type LogDateInfo,
   type LogEntry,
   type NetworkInterface,
 } from '../composables/useSettings'
 
-const activeTab = ref<'server' | 'users' | 'logs'>('server')
+const activeTab = ref<'server' | 'network' | 'users' | 'logs'>('server')
 
 const fsConfig = ref<FileSharingConfig>({
   port: 9800,
@@ -34,6 +38,7 @@ const fsConfig = ref<FileSharingConfig>({
   jwt_secret: '',
   token_duration_hours: 24,
   auto_start: false,
+  log_retention_days: 30,
 })
 
 const fsStatus = ref<FileSharingStatus>({
@@ -45,6 +50,15 @@ const fsStatus = ref<FileSharingStatus>({
 
 const users = ref<FileSharingUser[]>([])
 const logs = ref<LogEntry[]>([])
+const logDates = ref<LogDateInfo[]>([])
+const selectedLogDate = ref('')
+const logParsed = ref(0)
+const logTailOnly = ref(false)
+const logActionFilter = ref('')
+const logKeyword = ref('')
+const showLogFilesModal = ref(false)
+const selectedLogFiles = ref<string[]>([])
+const logFilesDeleting = ref(false)
 const newFolder = ref('')
 const saving = ref(false)
 const userSaving = ref(false)
@@ -64,6 +78,7 @@ function currentSnapshot() {
     shared_folders: fsConfig.value.shared_folders,
     token_duration_hours: fsConfig.value.token_duration_hours,
     auto_start: fsConfig.value.auto_start,
+    log_retention_days: fsConfig.value.log_retention_days,
   })
 }
 
@@ -75,6 +90,9 @@ const userForm = ref({ username: '', password: '', role: 'user' })
 
 const networkAddresses = ref<NetworkInterface[]>([])
 const qrCodeUrls = ref<Record<string, string>>({})
+
+// 仅展示已连接的物理网卡地址（虚拟网卡已在后端按 WMI PhysicalAdapter 过滤）
+const activeAddresses = computed(() => networkAddresses.value.filter((iface) => iface.connected))
 
 async function loadConfig() {
   try {
@@ -107,10 +125,47 @@ async function loadUsers(silent = false): Promise<boolean> {
   }
 }
 
+// 单次展示的日志条数，更早的记录由后端按最新截断
+const LOG_PAGE_LIMIT = 500
+
+function todayDate(): string {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
+const logActionOptions = computed(() => {
+  const seen = new Set(logs.value.map((log) => log.action))
+  return Array.from(seen).sort()
+})
+
+const filteredLogs = computed(() => {
+  const keyword = logKeyword.value.trim().toLowerCase()
+  return logs.value.filter((log) => {
+    if (logActionFilter.value && log.action !== logActionFilter.value) return false
+    if (!keyword) return true
+    return (
+      log.user.toLowerCase().includes(keyword) ||
+      log.detail.toLowerCase().includes(keyword) ||
+      logActionLabel(log.action).toLowerCase().includes(keyword)
+    )
+  })
+})
+
+const logSummary = computed(() => {
+  const base = `显示 ${filteredLogs.value.length} / ${logs.value.length} 条`
+  if (logTailOnly.value) return `${base} · 文件较大，仅扫描尾部`
+  if (logParsed.value > logs.value.length) return `${base} · 该日共 ${logParsed.value} 条`
+  return base
+})
+
 async function loadLogs(): Promise<boolean> {
   logsLoading.value = true
   try {
-    logs.value = await getFileSharingLogs(200)
+    const page = await readFileSharingLogDate(selectedLogDate.value, LOG_PAGE_LIMIT)
+    logs.value = page.entries
+    logParsed.value = page.parsed
+    logTailOnly.value = page.tail_only
     return true
   } catch (e) {
     console.error('Failed to load logs:', e)
@@ -120,12 +175,118 @@ async function loadLogs(): Promise<boolean> {
   }
 }
 
+/** 拉取可选日期；今天的文件可能还不存在，也要作为选项出现 */
+async function loadLogDates(): Promise<boolean> {
+  try {
+    const dates = await getFileSharingLogDates()
+    const today = todayDate()
+    if (!dates.some((item) => item.date === today)) {
+      dates.unshift({ date: today, size_bytes: 0, current: true, exists: false })
+    }
+    logDates.value = dates
+    if (!dates.some((item) => item.date === selectedLogDate.value)) {
+      selectedLogDate.value = today
+    }
+    return true
+  } catch (e) {
+    console.error('Failed to load log dates:', e)
+    return false
+  }
+}
+
+/** 日志页的数据源：先确定日期，再读该日期的记录 */
+async function loadLogView(): Promise<boolean> {
+  return (await loadLogDates()) && (await loadLogs())
+}
+
 async function refreshLogs() {
-  if (await loadLogs()) {
+  if (await loadLogView()) {
     notify('日志已刷新')
   } else {
     notify('刷新日志失败', 'error')
   }
+}
+
+async function onLogDateChange() {
+  if (!(await loadLogs())) {
+    notify('读取该日期日志失败', 'error')
+  }
+}
+
+/** 仅真实存在的日志文件可删除；「今天」的占位项不参与 */
+const existingLogFiles = computed(() => logDates.value.filter((item) => item.exists))
+
+const selectedLogFileSize = computed(() =>
+  existingLogFiles.value
+    .filter((item) => selectedLogFiles.value.includes(item.date))
+    .reduce((sum, item) => sum + item.size_bytes, 0),
+)
+
+function formatSize(bytes: number): string {
+  if (bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const value = bytes / Math.pow(1024, index)
+  return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`
+}
+
+function openLogFilesModal() {
+  selectedLogFiles.value = []
+  showLogFilesModal.value = true
+  // 打开时静默刷新一次，保证文件大小与实际一致
+  void loadLogDates()
+}
+
+function onLogFileSelection(rows: LogDateInfo[]) {
+  selectedLogFiles.value = rows.map((row) => row.date)
+}
+
+/** 删除日志文件；单个文件失败不阻断其余文件，结果逐项提示 */
+async function deleteLogFiles(dates: string[], all: boolean) {
+  if (dates.length === 0) return
+  const totalSize = dates.reduce((sum, date) => {
+    const item = existingLogFiles.value.find((file) => file.date === date)
+    return sum + (item?.size_bytes ?? 0)
+  }, 0)
+
+  try {
+    await ElMessageBox.confirm(
+      all
+        ? `确定要删除全部 ${dates.length} 个日志文件（共 ${formatSize(totalSize)}）吗？删除后无法恢复。`
+        : `确定要删除选中的 ${dates.length} 个日志文件（共 ${formatSize(totalSize)}）吗？删除后无法恢复。`,
+      all ? '删除全部日志' : '删除日志文件',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  logFilesDeleting.value = true
+  try {
+    const result = await deleteFileSharingLogDates(dates)
+    if (result.failed.length > 0) {
+      const detail = result.failed.map((item) => `${item.date}：${item.reason}`).join('；')
+      notify(`已删除 ${result.deleted.length} 个日志文件，${result.failed.length} 个失败（${detail}）`, 'error')
+    } else {
+      notify(`已删除 ${result.deleted.length} 个日志文件`)
+    }
+    selectedLogFiles.value = []
+    showLogFilesModal.value = false
+    await loadLogView()
+  } catch (e) {
+    console.error('Failed to delete log files:', e)
+    notify('删除日志文件失败: ' + e, 'error')
+  } finally {
+    logFilesDeleting.value = false
+  }
+}
+
+function deleteSelectedLogFiles() {
+  void deleteLogFiles([...selectedLogFiles.value], false)
+}
+
+function deleteAllLogFiles() {
+  void deleteLogFiles(existingLogFiles.value.map((item) => item.date), true)
 }
 
 async function loadNetworkAddresses(): Promise<boolean> {
@@ -167,7 +328,7 @@ async function generateQRCodes() {
           light: '#ffffff',
         },
       })
-      newQrUrls[iface.label] = qrDataUrl
+      newQrUrls[iface.ip] = qrDataUrl
     } catch (e) {
       console.error('Failed to generate QR code:', e)
     }
@@ -180,15 +341,16 @@ async function saveConfig() {
   if (!isDirty.value) return
   saving.value = true
   try {
-    await setFileSharingConfig({
+    const removed = await setFileSharingConfig({
       port: fsConfig.value.port,
       shared_folders: fsConfig.value.shared_folders,
       token_duration_hours: fsConfig.value.token_duration_hours,
       auto_start: fsConfig.value.auto_start,
+      log_retention_days: fsConfig.value.log_retention_days,
     })
     savedSnapshot.value = currentSnapshot()
     await loadStatus()
-    notify('配置已保存')
+    notify(removed > 0 ? `配置已保存，已自动清理 ${removed} 个过期日志文件` : '配置已保存')
   } catch (e) {
     console.error('Failed to save config:', e)
     notify('保存配置失败: ' + e, 'error')
@@ -357,7 +519,8 @@ async function forceLogoutUser(user: FileSharingUser) {
 
 watch(activeTab, async (tab) => {
   if (tab === 'users' && !(await loadUsers())) notify('加载用户列表失败', 'error')
-  if (tab === 'logs' && !(await loadLogs())) notify('加载操作日志失败', 'error')
+  if (tab === 'logs' && !(await loadLogView())) notify('加载操作日志失败', 'error')
+  if (tab === 'network' && !(await loadNetworkAddresses())) notify('加载局域网地址失败', 'error')
 })
 
 type LogActionType = 'success' | 'danger' | 'primary' | 'warning' | 'info'
@@ -377,8 +540,27 @@ const logActionTypes: Record<string, LogActionType> = {
   server_stop: 'warning',
 }
 
+const logActionLabels: Record<string, string> = {
+  login: '登录',
+  logout: '退出登录',
+  force_logout: '强制下线',
+  login_failed: '登录失败',
+  upload: '上传',
+  download: '下载',
+  delete: '删除',
+  create_user: '新建用户',
+  update_user: '修改用户',
+  delete_user: '删除用户',
+  server_start: '服务启动',
+  server_stop: '服务停止',
+}
+
 function logActionType(action: string): LogActionType {
   return logActionTypes[action] ?? 'info'
+}
+
+function logActionLabel(action: string): string {
+  return logActionLabels[action] ?? action
 }
 
 function formatTime(ts: string) {
@@ -402,6 +584,12 @@ function copyUrl(url?: string) {
       notify('复制失败', 'error')
     })
   }
+}
+
+function openLink(url: string) {
+  openUrl(url).catch((e) => {
+    notify('打开链接失败: ' + e, 'error')
+  })
 }
 
 let usersTimer: number | undefined
@@ -444,39 +632,6 @@ onUnmounted(() => {
                   {{ fsStatus.running ? '停止服务' : '启动服务' }}
                 </el-button>
               </div>
-              <div v-if="fsStatus.running && networkAddresses.length > 0" class="network-addresses-section">
-                <div class="network-addresses-header">
-                  <span class="status-label">局域网访问地址</span>
-                  <el-button size="small" text :loading="addressesLoading" @click="refreshNetworkAddresses">
-                    刷新
-                  </el-button>
-                </div>
-                <div class="network-addresses-grid">
-                  <div v-for="iface in networkAddresses" :key="iface.label"
-                    :class="['network-address-card', { offline: !iface.connected }]">
-                    <div class="network-card-header">
-                      <div class="network-card-badges">
-                        <el-tag size="small">{{ iface.label }}</el-tag>
-                        <el-tag :type="iface.connected ? 'success' : 'info'" size="small" effect="plain">
-                          {{ iface.connected ? '已连接' : '未连接' }}
-                        </el-tag>
-                      </div>
-                      <el-button size="small" text title="复制"
-                        @click="copyUrl(`http://${iface.ip}:${fsStatus.port}`)">
-                        <el-icon :size="14">
-                          <CopyDocument />
-                        </el-icon>
-                      </el-button>
-                    </div>
-                    <code class="network-url">http://{{ iface.ip }}:{{ fsStatus.port }}</code>
-                    <div v-if="iface.connected" class="qr-code-container">
-                      <img v-if="qrCodeUrls[iface.label]" :src="qrCodeUrls[iface.label]" alt="QR Code"
-                        class="qr-code-image" />
-                    </div>
-                    <div v-else class="network-offline-hint">网络未连接，该地址无法访问</div>
-                  </div>
-                </div>
-              </div>
             </section>
 
             <section class="section">
@@ -491,6 +646,12 @@ onUnmounted(() => {
                 <el-input-number v-model="fsConfig.token_duration_hours" :min="1" :max="8760" :controls="false"
                   class="num-input" />
               </div>
+              <div class="setting-row">
+                <label class="setting-label">日志保留天数</label>
+                <el-input-number v-model="fsConfig.log_retention_days" :min="0" :max="3650" :controls="false"
+                  class="num-input" />
+              </div>
+              <p class="setting-hint">0 表示永久保留；超期日志会在启动、保存配置和运行期间自动清理。</p>
               <div class="setting-row">
                 <label class="setting-label">程序启动时自动开启服务</label>
                 <el-switch v-model="fsConfig.auto_start" />
@@ -527,6 +688,56 @@ onUnmounted(() => {
                     <Folder />
                   </el-icon>
                 </el-button>
+              </div>
+            </section>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="局域网地址" name="network">
+          <div class="panel">
+            <section class="section">
+              <div class="network-addresses-header">
+                <span class="status-label">局域网访问地址</span>
+                <el-button size="small" text :loading="addressesLoading" @click="refreshNetworkAddresses">
+                  刷新
+                </el-button>
+              </div>
+              <div v-if="!fsStatus.running" class="empty-hint">
+                服务未启动，请先在「服务配置」页启动服务
+              </div>
+              <div v-else-if="activeAddresses.length === 0" class="empty-hint">
+                未检测到已连接的物理网卡，请检查网络连接后点击刷新
+              </div>
+              <div v-else class="network-addresses-grid">
+                <div v-for="iface in activeAddresses" :key="iface.ip"
+                  :class="['network-address-card', { recommended: iface.recommended }]">
+                  <div class="network-card-header">
+                    <div class="network-card-badges">
+                      <el-tag v-if="iface.recommended" size="small" type="success">推荐</el-tag>
+                      <el-tag size="small">{{ iface.label }}</el-tag>
+                      <span class="network-card-name">{{ iface.name }}</span>
+                    </div>
+                    <div class="network-card-actions">
+                      <el-button size="small" text title="打开链接"
+                        @click="openLink(`http://${iface.ip}:${fsStatus.port}`)">
+                        <el-icon :size="14">
+                          <Link />
+                        </el-icon>
+                      </el-button>
+                      <el-button size="small" text title="复制"
+                        @click="copyUrl(`http://${iface.ip}:${fsStatus.port}`)">
+                        <el-icon :size="14">
+                          <CopyDocument />
+                        </el-icon>
+                      </el-button>
+                    </div>
+                  </div>
+                  <code class="network-url">http://{{ iface.ip }}:{{ fsStatus.port }}</code>
+                  <div class="qr-code-container">
+                    <img v-if="qrCodeUrls[iface.ip]" :src="qrCodeUrls[iface.ip]" alt="QR Code"
+                      class="qr-code-image" />
+                  </div>
+                </div>
               </div>
             </section>
           </div>
@@ -586,13 +797,57 @@ onUnmounted(() => {
 
         <el-tab-pane label="操作日志" name="logs">
           <div class="panel">
-            <div class="panel-toolbar">
+            <div class="log-toolbar">
+              <el-select
+                v-model="selectedLogDate"
+                size="small"
+                class="log-date-select"
+                @change="onLogDateChange"
+              >
+                <el-option
+                  v-for="item in logDates"
+                  :key="item.date"
+                  :label="item.current ? `${item.date}（今天）` : item.date"
+                  :value="item.date"
+                />
+              </el-select>
+              <el-select
+                v-model="logActionFilter"
+                size="small"
+                placeholder="全部操作"
+                clearable
+                class="log-action-select"
+              >
+                <el-option
+                  v-for="action in logActionOptions"
+                  :key="action"
+                  :label="logActionLabel(action)"
+                  :value="action"
+                />
+              </el-select>
+              <el-input
+                v-model="logKeyword"
+                size="small"
+                :prefix-icon="Search"
+                placeholder="搜索用户、内容或操作"
+                clearable
+                class="log-search"
+              />
               <el-button size="small" :loading="logsLoading" @click="refreshLogs">刷新</el-button>
+              <el-tooltip :disabled="existingLogFiles.length > 0" content="暂无可删除的日志文件" placement="top">
+                <span>
+                  <el-button size="small" type="danger" plain :disabled="existingLogFiles.length === 0"
+                    @click="openLogFilesModal">删除日志文件…</el-button>
+                </span>
+              </el-tooltip>
+              <span class="text-secondary log-summary">{{ logSummary }}</span>
             </div>
-            <div v-if="logs.length === 0" class="empty-hint">暂无日志</div>
-            <div v-for="(log, i) in logs" :key="i" class="log-item">
+            <div v-if="filteredLogs.length === 0" class="empty-hint">
+              {{ logKeyword || logActionFilter ? '没有匹配的日志' : '该日期暂无日志' }}
+            </div>
+            <div v-for="(log, i) in filteredLogs" :key="i" class="log-item">
               <span class="log-time">{{ formatTime(log.timestamp) }}</span>
-              <el-tag :type="logActionType(log.action)" size="small" effect="plain">{{ log.action }}</el-tag>
+              <el-tag :type="logActionType(log.action)" size="small" effect="plain">{{ logActionLabel(log.action) }}</el-tag>
               <strong>{{ log.user }}</strong>
               <span class="log-detail">{{ log.detail }}</span>
             </div>
@@ -626,6 +881,40 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="showUserModal = false">取消</el-button>
         <el-button type="primary" :loading="userSaving" @click="saveUser">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showLogFilesModal" title="删除日志文件" width="480px" destroy-on-close>
+      <p class="log-files-hint">日志按日期存放，删除后无法恢复；「今天」的文件会在产生新记录时重新生成。</p>
+      <el-table :data="logDates" row-key="date" size="small" max-height="320" @selection-change="onLogFileSelection">
+        <el-table-column type="selection" width="44" :selectable="(row: LogDateInfo) => row.exists" />
+        <el-table-column label="日期" min-width="170">
+          <template #default="{ row }">
+            <span>{{ row.date }}</span>
+            <el-tag v-if="row.current" size="small" type="success" effect="plain" class="today-tag">今天</el-tag>
+            <el-tag v-else-if="!row.exists" size="small" type="info" effect="plain" class="today-tag">不存在</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="大小" width="100">
+          <template #default="{ row }">
+            {{ row.exists ? formatSize(row.size_bytes) : '—' }}
+          </template>
+        </el-table-column>
+        <template #empty>
+          <div class="empty-hint">暂无可删除的日志文件</div>
+        </template>
+      </el-table>
+      <template #footer>
+        <div class="log-files-footer">
+          <el-button type="danger" text :disabled="existingLogFiles.length === 0" :loading="logFilesDeleting"
+            @click="deleteAllLogFiles">全部删除</el-button>
+          <span class="log-files-summary">
+            {{ selectedLogFiles.length > 0 ? `已选 ${selectedLogFiles.length} 个，共 ${formatSize(selectedLogFileSize)}` : '请选择要删除的文件' }}
+          </span>
+          <el-button @click="showLogFilesModal = false">取消</el-button>
+          <el-button type="danger" :disabled="selectedLogFiles.length === 0" :loading="logFilesDeleting"
+            @click="deleteSelectedLogFiles">删除所选</el-button>
+        </div>
       </template>
     </el-dialog>
   </div>
@@ -703,10 +992,6 @@ onUnmounted(() => {
   margin-top: 12px;
 }
 
-.network-addresses-section {
-  padding: 12px 0;
-}
-
 .network-addresses-header {
   display: flex;
   align-items: center;
@@ -731,6 +1016,10 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.network-address-card.recommended {
+  border-color: var(--el-color-success);
+}
+
 .network-card-header {
   display: flex;
   align-items: center;
@@ -742,17 +1031,25 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
-.network-address-card.offline .network-url {
-  color: var(--text-secondary);
-}
-
-.network-offline-hint {
+.network-card-name {
   font-size: 12px;
   color: var(--text-secondary);
-  padding: 4px 0;
-  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.network-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.network-card-actions .el-button + .el-button {
+  margin-left: 0;
 }
 
 .network-url {
@@ -798,6 +1095,13 @@ onUnmounted(() => {
 
 .num-input :deep(.el-input__inner) {
   text-align: left;
+}
+
+.setting-hint {
+  margin: -2px 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
 }
 
 .folder-list {
@@ -888,6 +1192,30 @@ onUnmounted(() => {
   margin-left: 0;
 }
 
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.log-date-select {
+  width: 140px;
+}
+
+.log-action-select {
+  width: 108px;
+}
+
+.log-search {
+  width: 180px;
+}
+
+.log-summary {
+  font-size: 12px;
+}
+
 .empty-hint {
   text-align: center;
   padding: 24px;
@@ -903,6 +1231,39 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.log-files-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.today-tag {
+  margin-left: 6px;
+}
+
+.log-files-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.log-files-footer .el-button+.el-button {
+  margin-left: 0;
+}
+
+.log-files-summary {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .log-time {

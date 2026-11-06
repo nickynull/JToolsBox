@@ -24,6 +24,24 @@ export interface LogEntry {
   detail: string;
 }
 
+export interface LogDateInfo {
+  date: string;
+  size_bytes: number;
+  current: boolean;
+  /** 文件是否真实存在；界面为「今天」补的占位项为 false */
+  exists: boolean;
+}
+
+export interface LogPage {
+  date: string;
+  entries: LogEntry[];
+  /** 本次扫描到的有效记录数 */
+  parsed: number;
+  /** 文件过大，只读取了尾部 */
+  tail_only: boolean;
+  size_bytes: number;
+}
+
 export interface ServerStatus {
   running: boolean;
   port: number;

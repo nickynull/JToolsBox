@@ -101,12 +101,12 @@ onUnmounted(() => {
         </el-tooltip>
         <div class="user-chip">
           <el-icon><User /></el-icon>
-          <span>{{ session.username }}</span>
+          <span class="user-name">{{ session.username }}</span>
           <el-tag size="small" :type="session.role === 'admin' ? 'warning' : 'info'" disable-transitions>
             {{ session.role === "admin" ? "管理员" : "普通用户" }}
           </el-tag>
         </div>
-        <el-button size="small" :icon="SwitchButton" @click="logout">退出</el-button>
+        <el-button class="logout-btn" size="small" :icon="SwitchButton" @click="logout">退出</el-button>
       </div>
     </header>
 

@@ -3,15 +3,28 @@ import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { Refresh, Search } from "@element-plus/icons-vue";
 import { api } from "../api";
-import type { LogEntry, Session } from "../types";
+import type { LogEntry, LogDateInfo, LogPage, Session } from "../types";
 import { formatTime } from "../utils";
 
 const props = defineProps<{ session: Session }>();
 
+// 单次拉取的日志条数，更早的记录由后端按最新截断
+const LOG_PAGE_LIMIT = 500;
+
 const logs = ref<LogEntry[]>([]);
+const logDates = ref<LogDateInfo[]>([]);
+const selectedDate = ref("");
+const parsedCount = ref(0);
+const tailOnly = ref(false);
 const loading = ref(false);
 const keyword = ref("");
 const actionFilter = ref("");
+
+function todayDate(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
 
 const ACTION_LABELS: Record<string, string> = {
   login: "登录",
@@ -73,24 +86,71 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function load() {
+const summary = computed(() => {
+  const base = `显示 ${filtered.value.length} / ${logs.value.length} 条`;
+  if (tailOnly.value) return `${base} · 文件较大，仅扫描尾部`;
+  if (parsedCount.value > logs.value.length) return `${base} · 该日共 ${parsedCount.value} 条`;
+  return base;
+});
+
+/** 可选日期来自日志目录；今天的文件可能还没生成，也要出现在列表里 */
+async function loadDates(): Promise<boolean> {
+  try {
+    const dates = await api<LogDateInfo[]>("/api/logs/dates", { token: props.session.token });
+    const today = todayDate();
+    if (!dates.some((item) => item.date === today)) {
+      dates.unshift({ date: today, size_bytes: 0, current: true, exists: false });
+    }
+    logDates.value = dates;
+    if (!dates.some((item) => item.date === selectedDate.value)) {
+      selectedDate.value = today;
+    }
+    return true;
+  } catch (error) {
+    ElMessage.error(`读取日志日期失败：${messageOf(error)}`);
+    return false;
+  }
+}
+
+async function loadLogs(): Promise<boolean> {
+  if (!selectedDate.value) return false;
   loading.value = true;
   try {
-    logs.value = await api<LogEntry[]>("/api/logs?limit=200", { token: props.session.token });
+    const query = `date=${encodeURIComponent(selectedDate.value)}&limit=${LOG_PAGE_LIMIT}`;
+    const page = await api<LogPage>(`/api/logs/date?${query}`, { token: props.session.token });
+    logs.value = page.entries;
+    parsedCount.value = page.parsed;
+    tailOnly.value = page.tail_only;
+    return true;
   } catch (error) {
     logs.value = [];
+    parsedCount.value = 0;
+    tailOnly.value = false;
     ElMessage.error(`加载日志失败：${messageOf(error)}`);
+    return false;
   } finally {
     loading.value = false;
   }
 }
 
-onMounted(load);
+async function refresh() {
+  if (await loadDates()) await loadLogs();
+}
+
+onMounted(refresh);
 </script>
 
 <template>
   <div class="logs-view">
     <div class="toolbar">
+      <el-select v-model="selectedDate" class="date-select" @change="loadLogs">
+        <el-option
+          v-for="item in logDates"
+          :key="item.date"
+          :label="item.current ? `${item.date}（今天）` : item.date"
+          :value="item.date"
+        />
+      </el-select>
       <el-select v-model="actionFilter" placeholder="全部操作" clearable class="action-select">
         <el-option v-for="action in actionOptions" :key="action" :label="actionLabel(action)" :value="action" />
       </el-select>
@@ -101,8 +161,8 @@ onMounted(load);
         clearable
         class="search-input"
       />
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-      <span class="dim toolbar-grow">显示 {{ filtered.length }} / {{ logs.length }} 条（最多 200 条）</span>
+      <el-button :icon="Refresh" :loading="loading" @click="refresh">刷新</el-button>
+      <span class="dim toolbar-grow">{{ summary }}</span>
     </div>
 
     <div class="panel table-panel">
@@ -127,7 +187,7 @@ onMounted(load);
         </el-table-column>
 
         <template #empty>
-          <el-empty :description="keyword || actionFilter ? '没有匹配的日志' : '暂无日志'" :image-size="80" />
+          <el-empty :description="keyword || actionFilter ? '没有匹配的日志' : '该日期暂无日志'" :image-size="80" />
         </template>
       </el-table>
     </div>
@@ -139,6 +199,10 @@ onMounted(load);
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.date-select {
+  width: 150px;
 }
 
 .action-select {

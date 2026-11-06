@@ -16,6 +16,8 @@ export interface FileSharingConfig {
   jwt_secret: string
   token_duration_hours: number
   auto_start: boolean
+  /** 日志保留天数（含今天），0 表示永久保留 */
+  log_retention_days: number
 }
 
 export interface FileSharingStatus {
@@ -46,6 +48,7 @@ export interface NetworkInterface {
   ip: string
   label: string
   connected: boolean
+  recommended: boolean
 }
 
 const config = ref<AppConfig>({
@@ -145,8 +148,9 @@ export async function setFileSharingConfig(cfg: {
   shared_folders: string[]
   token_duration_hours: number
   auto_start?: boolean
-}): Promise<void> {
-  return invoke('set_file_sharing_config', { config: cfg })
+  log_retention_days?: number
+}): Promise<number> {
+  return invoke<number>('set_file_sharing_config', { config: cfg })
 }
 
 export async function startFileSharing(): Promise<number> {
@@ -196,6 +200,49 @@ export async function deleteFileSharingUser(id: string): Promise<void> {
 
 export async function getFileSharingLogs(limit?: number): Promise<LogEntry[]> {
   return invoke<LogEntry[]>('get_file_sharing_logs', { limit })
+}
+
+export interface LogDateInfo {
+  date: string
+  size_bytes: number
+  current: boolean
+  /** 文件是否真实存在；界面为「今天」补的占位项为 false */
+  exists: boolean
+}
+
+export interface LogDatePage {
+  date: string
+  entries: LogEntry[]
+  /** 本次扫描到的有效记录数 */
+  parsed: number
+  /** 文件过大，只读取了尾部 */
+  tail_only: boolean
+  size_bytes: number
+}
+
+/** 日志目录里可查看的日期，按日期倒序 */
+export async function getFileSharingLogDates(): Promise<LogDateInfo[]> {
+  return invoke<LogDateInfo[]>('get_file_sharing_log_dates')
+}
+
+/** 读取指定日期的日志文件 */
+export async function readFileSharingLogDate(date: string, limit?: number): Promise<LogDatePage> {
+  return invoke<LogDatePage>('read_file_sharing_log_date', { date, limit })
+}
+
+export interface LogDeleteFailure {
+  date: string
+  reason: string
+}
+
+export interface LogDeleteResult {
+  deleted: string[]
+  failed: LogDeleteFailure[]
+}
+
+/** 删除指定日期的日志文件，成功与失败逐项回报 */
+export async function deleteFileSharingLogDates(dates: string[]): Promise<LogDeleteResult> {
+  return invoke<LogDeleteResult>('delete_file_sharing_log_dates', { dates })
 }
 
 export async function getNetworkAddresses(): Promise<NetworkInterface[]> {
