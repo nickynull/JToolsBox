@@ -282,6 +282,7 @@ async function startDrag(e: MouseEvent) {
   background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border-color);
   position: relative;
+  z-index: 10;
 }
 
 .titlebar-left {
@@ -315,6 +316,7 @@ async function startDrag(e: MouseEvent) {
 
 .search-result-item {
   display: flex;
+  box-sizing: border-box;
   align-items: center;
   width: 100%;
   padding: 7px 8px;
