@@ -26,6 +26,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "languages": ["SimpChinese"]
+      }
+    },
     "copyright": "Copyright © 2026 Jimmy",
     "icon": [
       "icons/32x32.png",
