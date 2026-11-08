@@ -1,7 +1,7 @@
 {
   "name": "jtoolsbox",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "JToolsBox 桌面工具集合（局域网文件分享等）",
   "author": "Jimmy",
   "license": "MIT",

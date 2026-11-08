@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/nickynull/JToolsBox/compare/v1.1.0...v1.2.0) (2026-11-08)
+
+
+### Features
+
+* **tray:** 托盘右键菜单支持启停文件分享与退出程序 ([63fd1d6](https://github.com/nickynull/JToolsBox/commit/63fd1d6534cfd2f1fd70d5e9955c872d20efb19c))
+
+
+### Bug Fixes
+
+* **file-sharing:** 停止服务等待优雅关闭完成，修复状态不刷新 ([b02735a](https://github.com/nickynull/JToolsBox/commit/b02735a4694dc01243652e2b53e734ea86c8010a))
+
 ## [1.1.0](https://github.com/nickynull/JToolsBox/compare/v1.0.0...v1.1.0) (2026-11-06)
 
 
