@@ -1276,6 +1276,10 @@ pub async fn start_server(fs_state: Arc<FileSharingState>) -> Result<u16, String
         status.running = false;
         status.port = 0;
         status.url = None;
+        drop(status);
+
+        // 清掉停机句柄，重复停止会明确报"未启动"而不是静默成功
+        fs_state_clone.shutdown_tx.write().await.take();
     });
 
     fs_state.add_log("system", "server_start", &format!("服务已启动，监听端口 {}", actual_port)).await;
@@ -1289,13 +1293,27 @@ pub async fn stop_server(fs_state: Arc<FileSharingState>) -> Result<(), String> 
         tx.clone()
     };
 
-    if let Some(tx) = shutdown_tx {
-        let _ = tx.send(());
-        fs_state.add_log("system", "server_stop", "服务已停止").await;
-        Ok(())
-    } else {
-        Err("分享服务未启动".to_string())
+    let Some(tx) = shutdown_tx else {
+        return Err("分享服务未启动".to_string());
+    };
+
+    let _ = tx.send(());
+
+    // axum 的优雅关闭在后台任务里完成，running 状态也是那边回落的；
+    // 这里必须等它真正退出，否则调用方（托盘菜单、界面按钮）紧接着读状态会拿到"仍在运行"的中间态
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !fs_state.status.read().await.running {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("停止服务超时，请稍后重试".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    fs_state.add_log("system", "server_stop", "服务已停止").await;
+    Ok(())
 }
 
 async fn serve_web_ui() -> Response {
