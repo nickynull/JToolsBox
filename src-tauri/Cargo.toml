@@ -1,6 +1,6 @@
 [package]
 name = "jtoolsbox"
-version = "1.2.0"
+version = "1.2.1"
 description = "JToolsBox 桌面工具集合（局域网文件分享等）"
 authors = ["Jimmy"]
 license = "MIT"

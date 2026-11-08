@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/nickynull/JToolsBox/compare/v1.2.0...v1.2.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **icons:** 图标改为与 JToolsBoxMobile 一致的黄底 JT ([2ae9f8e](https://github.com/nickynull/JToolsBox/commit/2ae9f8e49fba00e35ab1f7a84f013a071e16a3e8))
+
 ## [1.2.0](https://github.com/nickynull/JToolsBox/compare/v1.1.0...v1.2.0) (2026-11-08)
 
 
