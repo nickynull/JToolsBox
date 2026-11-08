@@ -1,5 +1,7 @@
 # JToolsBox
 
+> 作者：Jimmy · 应用标识：`com.jimmy.jtoolsbox`
+
 一个基于 Tauri v2 + Vue 3 + TypeScript 构建的桌面工具集合应用。
 
 ## 功能特性
