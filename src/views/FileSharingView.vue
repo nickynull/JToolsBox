@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { ElMessageBox } from 'element-plus'
 import { Delete, CopyDocument, Folder, FolderOpened, Link, Search } from '@element-plus/icons-vue'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -312,6 +313,17 @@ async function refreshNetworkAddresses() {
   }
 }
 
+/** 托盘菜单启停服务后，同步界面上的状态与访问地址 */
+async function onServerStatusChanged() {
+  await loadStatus()
+  if (fsStatus.value.running) {
+    await loadNetworkAddresses()
+  } else {
+    networkAddresses.value = []
+    qrCodeUrls.value = {}
+  }
+}
+
 async function generateQRCodes() {
   const port = fsStatus.value.port || fsConfig.value.port
   const newQrUrls: Record<string, string> = {}
@@ -593,6 +605,7 @@ function openLink(url: string) {
 }
 
 let usersTimer: number | undefined
+let unlistenStatusChanged: UnlistenFn | null = null
 
 onMounted(async () => {
   await loadConfig()
@@ -600,6 +613,10 @@ onMounted(async () => {
   if (fsStatus.value.running) {
     await loadNetworkAddresses()
   }
+  // 托盘右键菜单可以直接启停服务，这里跟随刷新
+  unlistenStatusChanged = await listen('file-sharing-status-changed', () => {
+    void onServerStatusChanged()
+  })
   usersTimer = window.setInterval(() => {
     if (activeTab.value === 'users') {
       void loadUsers(true)
@@ -609,6 +626,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.clearInterval(usersTimer)
+  unlistenStatusChanged?.()
 })
 </script>
 
@@ -623,7 +641,7 @@ onUnmounted(() => {
               <div class="status-row">
                 <span class="status-label">当前状态</span>
                 <el-tag :type="fsStatus.running ? 'success' : 'danger'" size="small">
-                  {{ fsStatus.running ? '运行中' : '已停止' }}
+                  {{ fsStatus.running ? `运行中 · 端口 ${fsStatus.port}` : '已停止' }}
                 </el-tag>
               </div>
               <div class="status-actions">

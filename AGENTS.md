@@ -94,11 +94,18 @@ cd src-tauri && cargo check      # Rust 编译检查（首次较慢）
 5. **桌面窗口 `decorations: false`**，标题栏是自己画的。涉及最小化/最大化/拖拽/主题的 API
    必须在 `src-tauri/capabilities/default.json` 放行，否则**运行期**才报权限错误。
    `close_action = hide` 时关闭按钮被拦截并隐藏到托盘（`lib.rs` 的 `on_window_event`）。
+   托盘右键菜单（`TrayMenuItems`）里「开启/停止服务」的可用性由 `refresh_tray_menu` 维护，
+   启停服务后**必须**调用它（托盘点击、`start_file_sharing`/`stop_file_sharing` 命令两处都已接入），
+   否则菜单项状态会与实际相反；托盘操作结果通过 `tray-toast`、状态变化通过
+   `file-sharing-status-changed` 事件推给前端（`App.vue` / `FileSharingView.vue`）。
 
 6. **文件分享服务**：axum 监听 `0.0.0.0:<port>`（默认 9800）。路由 `/`（页面）、`/assets/*`、
    `/api/login`、`/api/*`（JWT 保护）。网页端每次请求带 `Authorization: Bearer`，
    下载/预览走 query token；401 触发重新登录。日志按日写入 `logs/YYYY-MM-DD.jsonl`，
    启动时与每 6 小时按 `log_retention_days` 清理。
+   `stop_server` 会**等 axum 优雅关闭真正完成**（`status.running` 回落，最多 5 秒）才返回，
+   不要改回"发完 shutdown 信号就返回"——否则调用方紧接着读状态会拿到仍在运行的中间态
+   （表现为托盘菜单/界面状态不刷新）。
 
 7. **版本号由 release-please 维护**（`package.json` + `Cargo.toml` + `tauri.conf.json` 三处），
    不要手改；提交信息必须符合 Conventional Commits（`feat:`、`fix:`、`refactor:` 等），否则不产生发版。

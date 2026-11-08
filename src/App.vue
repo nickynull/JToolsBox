@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import TitleBar from './components/TitleBar.vue'
 import Sidebar from './components/Sidebar.vue'
 import SettingsView from './views/SettingsView.vue'
 import FileSharingView from './views/FileSharingView.vue'
+import { notify } from './composables/useNotify'
 
 const currentView = ref('file-sharing')
 const sidebarVisible = ref(true)
@@ -39,6 +41,19 @@ function handleNavigateToView(viewId: string) {
 function handleNavigateToSetting(settingId: string) {
   activeSettingId.value = settingId
 }
+
+// 托盘菜单启停服务的结果提示：窗口隐藏时消息会留在页面里，打开即见
+let unlistenTrayToast: UnlistenFn | null = null
+
+onMounted(async () => {
+  unlistenTrayToast = await listen<{ level: string; message: string }>('tray-toast', (event) => {
+    notify(event.payload.message, event.payload.level === 'error' ? 'error' : 'success')
+  })
+})
+
+onUnmounted(() => {
+  unlistenTrayToast?.()
+})
 </script>
 
 <template>

@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Emitter, Manager};
 
 use features::file_sharing;
 use file_sharing::{create_shared_state, server as fs_server, FileSharingConfig, FileSharingState};
@@ -114,13 +115,23 @@ async fn set_file_sharing_config(
 }
 
 #[tauri::command]
-async fn start_file_sharing(state: tauri::State<'_, AppState>) -> Result<u16, String> {
-    fs_server::start_server(state.file_sharing.clone()).await
+async fn start_file_sharing(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<u16, String> {
+    let result = fs_server::start_server(state.file_sharing.clone()).await;
+    refresh_tray_menu(&app, &state.file_sharing).await;
+    result
 }
 
 #[tauri::command]
-async fn stop_file_sharing(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    fs_server::stop_server(state.file_sharing.clone()).await
+async fn stop_file_sharing(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let result = fs_server::stop_server(state.file_sharing.clone()).await;
+    refresh_tray_menu(&app, &state.file_sharing).await;
+    result
 }
 
 #[tauri::command]
@@ -660,6 +671,70 @@ fn set_data_root_path(
     Ok(())
 }
 
+/// 托盘右键菜单里需要随服务状态刷新的菜单项（MenuItem 是 Arc 句柄，克隆即共享）
+struct TrayMenuItems {
+    status: MenuItem<tauri::Wry>,
+    start: MenuItem<tauri::Wry>,
+    stop: MenuItem<tauri::Wry>,
+}
+
+/// 按服务真实状态刷新托盘菜单：状态文案 + 启停项的可用性，
+/// 桌面端界面里启停时也会调用，保证菜单状态与界面一致
+async fn refresh_tray_menu(app: &AppHandle, fs_state: &std::sync::Arc<FileSharingState>) {
+    let (running, port) = {
+        let status = fs_state.status.read().await;
+        (status.running, status.port)
+    };
+
+    if let Some(items) = app.try_state::<TrayMenuItems>() {
+        let text = if running {
+            format!("运行中 · 端口 {}", port)
+        } else {
+            "已停止".to_string()
+        };
+        let _ = items.status.set_text(text);
+        let _ = items.start.set_enabled(!running);
+        let _ = items.stop.set_enabled(running);
+    }
+}
+
+/// 托盘菜单被点击：启停分享服务 / 退出程序。
+/// 菜单点击发生在主线程，启停是异步操作，放到异步运行时里执行，完成后回推菜单与前端状态
+fn handle_tray_menu(app: &AppHandle, id: &str) {
+    match id {
+        "fs-start" | "fs-stop" => {
+            let starting = id == "fs-start";
+            let fs_state = app.state::<AppState>().file_sharing.clone();
+            let app_handle = app.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let outcome = if starting {
+                    fs_server::start_server(fs_state.clone())
+                        .await
+                        .map(|port| format!("文件分享已启动，端口 {}", port))
+                } else {
+                    fs_server::stop_server(fs_state.clone())
+                        .await
+                        .map(|_| "文件分享已停止".to_string())
+                };
+
+                let level = if outcome.is_ok() { "success" } else { "error" };
+                let message = outcome.unwrap_or_else(|e| e);
+                let _ = app_handle.emit(
+                    "tray-toast",
+                    serde_json::json!({ "level": level, "message": message }),
+                );
+
+                refresh_tray_menu(&app_handle, &fs_state).await;
+                // 桌面端界面据此刷新「当前状态」和访问地址
+                let _ = app_handle.emit("file-sharing-status-changed", serde_json::json!({}));
+            });
+        }
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config_path = get_config_path();
@@ -725,8 +800,45 @@ pub fn run() {
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
             let icon = app.default_window_icon().cloned();
+
+            // 右键菜单：文件分享（状态 / 开启 / 停止）+ 退出程序
+            let status_item = MenuItem::with_id(app, "fs-status", "已停止", false, None::<&str>)?;
+            let start_item = MenuItem::with_id(app, "fs-start", "开启服务", true, None::<&str>)?;
+            let stop_item = MenuItem::with_id(app, "fs-stop", "停止服务", false, None::<&str>)?;
+            let fs_menu = Submenu::with_items(
+                app,
+                "文件分享",
+                true,
+                &[
+                    &status_item,
+                    &PredefinedMenuItem::separator(app)?,
+                    &start_item,
+                    &stop_item,
+                ],
+            )?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(
+                app,
+                &[
+                    &fs_menu,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit_item,
+                ],
+            )?;
+
+            // 供 refresh_tray_menu 在启停后改文案与可用状态
+            app.manage(TrayMenuItems {
+                status: status_item.clone(),
+                start: start_item.clone(),
+                stop: stop_item.clone(),
+            });
+
             let mut builder = TrayIconBuilder::new()
                 .tooltip("JToolsBox")
+                .menu(&tray_menu)
+                // 左键仍用于唤起主窗口，菜单只在右键弹出
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| handle_tray_menu(app, event.id().as_ref()))
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -748,13 +860,18 @@ pub fn run() {
             let _tray = builder.build(app)?;
 
             let fs_state = fs_state_clone.clone();
+            let tray_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                refresh_tray_menu(&tray_app, &fs_state).await;
+
                 let should_start = {
                     let c = fs_state.config.read().await;
                     c.auto_start
                 };
                 if should_start {
                     let _ = fs_server::start_server(fs_state.clone()).await;
+                    refresh_tray_menu(&tray_app, &fs_state).await;
+                    let _ = tray_app.emit("file-sharing-status-changed", serde_json::json!({}));
                 }
             });
 
