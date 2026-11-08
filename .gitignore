@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# WorkBuddy 本地协作记忆（纯个人使用，不入库）
+.workbuddy/
