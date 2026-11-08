@@ -44,7 +44,8 @@ JToolsBox（作者 Jimmy，包名 `com.jimmy.jtoolsbox`）是一个 **Tauri v2 �
 │  ├─ src/web_support.rs     内嵌网页托管（WebApp + 静态资源响应）
 │  ├─ build.rs               编译期扫描 web/*/dist → 生成 web_assets.rs 嵌入表
 │  └─ capabilities/          Tauri 权限（新增窗口/对话框 API 必须在此放行）
-└─ scripts/build-all.mjs     并行跑桌面端与所有网页端的 build
+├─ scripts/build-all.mjs     并行跑桌面端与所有网页端的 build
+└─ scripts/make-icon.py      生成图标源图（黄底黑字「JT」，与 JToolsBoxMobile 保持同一套）
 ```
 
 ## 4. 常用命令
@@ -59,6 +60,9 @@ npm run build                    # 桌面端类型检查 + 打包前端
 npm run build:web:file-sharing   # 文件分享网页：类型检查 + 打包到 web/file-sharing/dist
 npm run build:all                # 上面两个并行（tauri build 的 beforeBuildCommand）
 npm run tauri build              # 出安装包
+
+python scripts/make-icon.py      # 重新生成图标源图（黄底黑字「JT」，与 JToolsBoxMobile 同一套）
+npx tauri icon src-tauri/icons/app-icon.png   # 源图 → 全平台图标（ico/icns/各尺寸 png）
 ```
 
 校验（改完代码至少跑一遍）：
