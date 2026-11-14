@@ -434,6 +434,11 @@ fn parse_range(value: &str, total: u64) -> Option<ByteRange> {
     }
 }
 
+/// 下载流每次读取的块大小。
+/// tokio-util 的 `ReaderStream` 默认只有 4 KiB，而 `tokio::fs::File` 每读一次都要派发给阻塞线程池，
+/// 大文件下载时每秒上万次小派发会吃掉大量吞吐；256 KiB 把派发次数降到 1/64。
+const FILE_STREAM_CHUNK_SIZE: usize = 256 * 1024;
+
 async fn stream_file(
     path: &std::path::Path,
     request_headers: &HeaderMap,
@@ -495,7 +500,7 @@ async fn stream_file(
         return (StatusCode::INTERNAL_SERVER_ERROR, err_response("读取文件位置失败")).into_response();
     }
 
-    let stream = ReaderStream::new(file.take(length));
+    let stream = ReaderStream::with_capacity(file.take(length), FILE_STREAM_CHUNK_SIZE);
     builder.body(Body::from_stream(stream)).unwrap()
 }
 
