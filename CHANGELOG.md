@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0](https://github.com/nickynull/JToolsBox/compare/v1.2.1...v1.3.0) (2026-11-19)
+
+
+### Features
+
+* 网页资源运行期读磁盘、窗口状态持久化与启动不闪白 ([a0d9ff6](https://github.com/nickynull/JToolsBox/commit/a0d9ff6727a96c305f90d0e4b291deb35426621e))
+
+
+### Performance Improvements
+
+* **file-sharing:** 下载流缓冲由 4 KiB 提升到 256 KiB ([4ce6768](https://github.com/nickynull/JToolsBox/commit/4ce6768eaf5cfab04759390078fdeb558ab55e51))
+
 ## [1.2.1](https://github.com/nickynull/JToolsBox/compare/v1.2.0...v1.2.1) (2026-11-08)
 
 
