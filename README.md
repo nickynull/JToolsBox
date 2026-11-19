@@ -44,7 +44,7 @@
 
 #### 客户端功能
 
-网页端为独立的 Vue 3 + Element Plus 应用，构建产物内嵌进二进制，随服务启动由 Rust 直接托管。
+网页端为独立的 Vue 3 + Element Plus 应用，构建产物放在程序目录的 `webapps/file-sharing/`，服务启动后按目录实时读取（替换文件刷新浏览器即生效，无需重新编译）。
 
 - **Web 界面访问**：通过浏览器访问 `http://localhost:<端口>`，手机/其他电脑同网段可用
 - **登录认证**：JWT + 服务端会话，token 保存在本地，会话可被管理员强制下线
@@ -64,6 +64,7 @@
 - 用户数据：`function-datas/file-sharing/users.json`
 - 操作日志：`function-datas/file-sharing/logs/YYYY-MM-DD.jsonl`
 - 共享文件：用户配置的共享文件夹路径
+- 网页资源：`webapps/file-sharing/`（程序自带，只读资产，与用户数据分开；位置固定，不支持自定义）
 
 ### 4. 设置功能
 
@@ -152,20 +153,29 @@ npm install
 # 启动桌面端开发（vite + tauri）
 npm run tauri dev
 
+# 先构建网页端产物（含类型检查），再启动桌面端开发（涉及网页端开发时用这条）
+npm run tauri:dev
+
 # 构建桌面端（仅前端类型检查 + 打包）
 npm run build
 
-# 构建全部网页模块后再打包桌面端（网页产物会嵌入二进制）
-npm run build:web:file-sharing && npm run tauri build
+# 出安装包（会先构建网页端，并把产物暂存到 src-tauri/webapps 一并打包）
+npm run tauri build
 
 # 单独构建某个功能网页（类型检查 + vite build）
 npm run build:web:file-sharing
+
+# 把 web/*/dist 暂存到 src-tauri/webapps（安装包携带用，build:all 已包含）
+npm run stage:webapps
 
 # 单独调试某个功能网页（独立浏览器访问，/api 代理到 9800）
 npm run dev:web:file-sharing
 ```
 
-> 网页产物位于 `web/<功能>/dist`，已被 `.gitignore` 忽略。新拉取代码后先执行对应的 `build:web:*`，否则网页端会显示"网页端尚未构建"提示。
+> 网页产物位于 `web/<功能>/dist`（已被 `.gitignore` 忽略），运行期由服务按目录读取。
+> 开发时直接读该目录并支持热替换；发布时 `npm run stage:webapps` 会把它拷到
+> `src-tauri/webapps/<功能>/`，随安装包落到程序目录的 `webapps/<功能>/`。
+> 若安装包里缺少这个目录，网页端会返回引导页并列出检查过的路径。
 
 ## 项目结构
 
@@ -189,7 +199,7 @@ JToolsBox/
 │       ├── index.html
 │       ├── vite.config.ts            # 独立配置（/api 代理到 9800）
 │       ├── tsconfig.json
-│       ├── dist/                     # 构建产物（git 忽略，编译时嵌入）
+│       ├── dist/                     # 构建产物（git 忽略，运行期按目录读取）
 │       └── src/
 │           ├── main.ts
 │           ├── App.vue
@@ -205,9 +215,10 @@ JToolsBox/
 │   │   │       ├── mod.rs           # 模块定义和状态管理
 │   │   │       ├── auth.rs          # JWT 认证和密码加密
 │   │   │       └── server.rs        # Web 服务器和 API 路由
-│   │   ├── web_support.rs           # 内嵌网页托管（WebApp / 静态资源）
+│   │   ├── web_support.rs           # 网页资源托管（运行期读 webapps/<功能名>/）
 │   │   └── lib.rs                   # 主库和 Tauri 命令
-│   ├── build.rs                      # 编译期扫描 web/*/dist 并生成嵌入表
+│   ├── webapps/                      # 打包前暂存的网页资源（git 忽略，随安装包分发）
+│   ├── build.rs                      # 只调 tauri_build::build()，不再嵌入前端
 │   ├── capabilities/
 │   │   └── default.json             # Tauri 权限配置
 │   └── Cargo.toml                   # Rust 依赖
@@ -219,17 +230,20 @@ JToolsBox/
 功能网页按"一个功能一个目录"组织，互不共享代码，只在托管方式上复用 `web_support.rs`。
 
 - `web/<功能>/index.html` 存在即被视为一个网页应用
-- 编译时 `build.rs` 扫描该目录，把 `dist` 全部文件嵌入，并生成 Rust 模块 `web_support::generated::<功能名>`（`file-sharing` → `file_sharing`，非字母数字转下划线）
-- 功能自己的服务端代码用它来响应页面与静态资源
+- 运行期按功能名解析资源目录（`WebMount::resolve("<功能名>", app_dir)`），查找顺序：
+  开发期（debug）优先仓库内的 `web/<功能>/dist` → `<程序目录>/webapps/<功能名>/`（位置固定，不提供自定义入口）
+- 找资源时校验路径不越出资源根（`..`、反斜杠、符号链接都会被挡），并带 `ETag` 做缓存协商
+- 每个功能拥有独立子目录，互不覆盖：新增服务不需要改动任何全局路径
 
 新增一个功能网页的步骤：
 
 1. 新建 `web/<功能名>/`，放入 `index.html`、`vite.config.ts`（`root` 指向自身目录）、`tsconfig.json` 与 `src/`
 2. 在 `package.json` 增加 `build:web:<功能名>` / `dev:web:<功能名>` 脚本
-3. 在 `src-tauri/src/features/<功能>/server.rs` 中声明
-   `static WEB_APP: WebApp = WebApp::new(generated::<模块名>::ASSETS, generated::<模块名>::INDEX_HTML);`
+3. 在 `src-tauri/src/features/<功能>/server.rs` 中用
+   `state.web_mount()` 拿到 `WebMount`，页面与静态资源都走 `mount.response(path, &headers)`
 4. 在 `features/mod.rs` 注册模块，把页面路由挂到该功能自己的服务上
-5. 执行 `npm run build:web:<功能名>` 后再编译 Rust
+5. 执行 `npm run build:web:<功能名>` 后刷新浏览器即可（无需重编 Rust）；出安装包时
+   `npm run stage:webapps` 会把产物暂存到 `src-tauri/webapps/<功能名>/`
 
 ## 功能规划
 
@@ -238,7 +252,7 @@ JToolsBox/
 - [x] 搜索功能和快捷键
 - [x] 文件分享功能
 - [x] 文件分享网页端（Vue 3 + Element Plus，分片上传进度/暂停/取消、在线预览）
-- [x] 功能网页模块化（每功能独立网页，构建期嵌入二进制）
+- [x] 功能网页模块化（每功能独立网页 + 独立 webapps 目录，运行期按目录读取）
 - [x] 数据路径管理和迁移
 - [ ] 更多工具功能（待开发）
 

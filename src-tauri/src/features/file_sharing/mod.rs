@@ -1,11 +1,15 @@
 pub mod auth;
 pub mod server;
 
+use crate::web_support::WebMount;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// 本功能在 `webapps/` 下的目录名，也是 `web/<name>/` 的目录名
+pub const WEB_FEATURE: &str = "file-sharing";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileSharingConfig {
@@ -259,10 +263,21 @@ pub struct FileSharingState {
     pub sessions: tokio::sync::Mutex<HashMap<String, SessionInfo>>,
     pub shutdown_tx: RwLock<Option<tokio::sync::broadcast::Sender<()>>>,
     pub data_dir: PathBuf,
+    /// 程序资产根（Tauri 的 resource_dir）：网页资源位于 `<app_dir>/webapps/<功能名>/`
+    app_dir: std::sync::RwLock<Option<PathBuf>>,
+    /// 当前解析到的网页资源挂载点；缺失时按需重新解析
+    web_app: std::sync::RwLock<Arc<WebMount>>,
 }
 
 impl FileSharingState {
     pub fn new(data_dir: PathBuf) -> Self {
+        // 先用 exe 所在目录兜底（Windows 下与 resource_dir 相同），
+        // 启动后由 lib.rs 用 Tauri 的 resource_dir 覆盖，macOS 下才指向 .app/Contents/Resources
+        let app_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf));
+        let web_app = Arc::new(WebMount::resolve(WEB_FEATURE, app_dir.as_deref()));
+
         Self {
             config: RwLock::new(FileSharingConfig::default()),
             users: RwLock::new(vec![]),
@@ -272,7 +287,31 @@ impl FileSharingState {
             sessions: tokio::sync::Mutex::new(HashMap::new()),
             shutdown_tx: RwLock::new(None),
             data_dir,
+            app_dir: std::sync::RwLock::new(app_dir),
+            web_app: std::sync::RwLock::new(web_app),
         }
+    }
+
+    /// 设置程序资产根（启动时由 Tauri 提供）；设置后需调用 `refresh_web_mount`
+    pub fn set_app_dir(&self, dir: Option<PathBuf>) {
+        *self.app_dir.write().unwrap() = dir;
+    }
+
+    pub fn app_dir(&self) -> Option<PathBuf> {
+        self.app_dir.read().unwrap().clone()
+    }
+
+    /// 当前网页资源挂载点；读锁立即释放，不跨 await 持有
+    pub fn web_mount(&self) -> Arc<WebMount> {
+        self.web_app.read().unwrap().clone()
+    }
+
+    /// 按当前程序资产根重新解析网页资源目录（资源位置固定，不接受覆盖）
+    pub fn refresh_web_mount(&self) -> Arc<WebMount> {
+        let app_dir = self.app_dir();
+        let mount = Arc::new(WebMount::resolve(WEB_FEATURE, app_dir.as_deref()));
+        *self.web_app.write().unwrap() = mount.clone();
+        mount
     }
 
     pub fn config_path(&self) -> PathBuf {

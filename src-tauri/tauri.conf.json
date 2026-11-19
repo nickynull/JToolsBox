@@ -4,7 +4,7 @@
   "version": "1.2.1",
   "identifier": "com.jimmy.jtoolsbox",
   "build": {
-    "beforeDevCommand": "npm run build:web:file-sharing:fast && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build:all",
     "frontendDist": "../dist"
@@ -16,7 +16,10 @@
         "title": "JToolsBox",
         "width": 800,
         "height": 600,
-        "decorations": false
+        "minWidth": 640,
+        "minHeight": 480,
+        "decorations": false,
+        "visible": false
       }
     ],
     "security": {
@@ -26,6 +29,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "webapps/**/*"
+    ],
     "publisher": "Jimmy",
     "category": "Utility",
     "shortDescription": "JToolsBox 桌面工具集合",

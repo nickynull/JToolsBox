@@ -13,6 +13,8 @@
     "build:web:file-sharing": "vue-tsc -p web/file-sharing/tsconfig.json --noEmit && vite build --config web/file-sharing/vite.config.ts",
     "build:all": "node scripts/build-all.mjs",
     "build:web:file-sharing:fast": "vite build --config web/file-sharing/vite.config.ts",
+    "stage:webapps": "node scripts/stage-webapps.mjs",
+    "tauri:dev": "npm run build:web:file-sharing && tauri dev",
     "preview": "vite preview",
     "tauri": "tauri"
   },

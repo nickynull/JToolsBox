@@ -88,7 +88,7 @@ async function submit() {
         </el-button>
       </el-form>
 
-      <p class="login-hint">请使用管理员分配的账号登录，登录状态会保留 24 小时</p>
+      <p class="login-hint">请使用管理员分配的账号登录，登录状态到期后需重新登录</p>
     </div>
   </div>
 </template>

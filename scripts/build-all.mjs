@@ -19,3 +19,6 @@ await Promise.all([
   run('npm run build'),
   run('npm run build:web:file-sharing'),
 ]);
+
+// 网页产物要先进 src-tauri/webapps，tauri 的 bundle.resources 才能把它带进安装包
+await run('npm run stage:webapps');

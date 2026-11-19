@@ -15,13 +15,17 @@ use tokio_util::io::ReaderStream;
 
 use super::auth::{auth_middleware, create_token, hash_password, verify_password, Claims};
 use super::{FileEntry, FileSharingState, SessionInfo, UploadReservation, User, SESSION_ONLINE_WINDOW};
-use crate::web_support::{generated, WebApp};
+use crate::web_support::WebMount;
 
-/// 本功能专属网页，构建期来自 `web/file-sharing/dist`
-static WEB_APP: WebApp = WebApp::new(
-    generated::file_sharing::ASSETS,
-    generated::file_sharing::INDEX_HTML,
-);
+/// 取当前网页资源挂载点。未解析到目录时顺手重试一次：
+/// 把 webapps/file-sharing 补进去后刷新页面即可生效，不必重启程序。
+async fn current_mount(state: &Arc<FileSharingState>) -> Arc<WebMount> {
+    let mount = state.web_mount();
+    if mount.is_resolved() {
+        return mount;
+    }
+    state.refresh_web_mount()
+}
 
 pub fn create_router(state: Arc<FileSharingState>) -> Router {
     let api_routes = Router::new()
@@ -1239,6 +1243,35 @@ pub async fn start_server(fs_state: Arc<FileSharingState>) -> Result<u16, String
         }
     }
 
+    // 每次启动都重新解析网页资源目录：用户可能刚补上 webapps
+    let mount = fs_state.refresh_web_mount();
+    match mount.root() {
+        Some(root) => {
+            fs_state
+                .add_log(
+                    "system",
+                    "web_mount",
+                    &format!("网页资源目录：{}", root.display()),
+                )
+                .await;
+        }
+        None => {
+            let checked = mount
+                .candidates()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("；");
+            fs_state
+                .add_log(
+                    "system",
+                    "web_mount",
+                    &format!("网页资源未找到，已检查：{}", checked),
+                )
+                .await;
+        }
+    }
+
     let router = create_router(fs_state.clone());
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
@@ -1321,27 +1354,52 @@ pub async fn stop_server(fs_state: Arc<FileSharingState>) -> Result<(), String> 
     Ok(())
 }
 
-async fn serve_web_ui() -> Response {
-    WEB_APP.index_response()
+async fn serve_web_ui(
+    State(state): State<Arc<FileSharingState>>,
+    headers: HeaderMap,
+) -> Response {
+    current_mount(&state)
+        .await
+        .response("/index.html", &headers)
+        .await
 }
 
-async fn serve_spa(uri: axum::http::Uri) -> Response {
+async fn serve_spa(
+    State(state): State<Arc<FileSharingState>>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
     if uri.path().starts_with("/api/") {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
-    WEB_APP.index_response()
+    current_mount(&state)
+        .await
+        .response("/index.html", &headers)
+        .await
 }
 
-async fn serve_favicon() -> Response {
-    if WEB_APP.asset("/favicon.ico").is_some() {
-        WEB_APP.asset_response("/favicon.ico")
+async fn serve_favicon(
+    State(state): State<Arc<FileSharingState>>,
+    headers: HeaderMap,
+) -> Response {
+    let mount = current_mount(&state).await;
+    if mount.exists("/favicon.ico").await {
+        mount.response("/favicon.ico", &headers).await
     } else {
         StatusCode::NO_CONTENT.into_response()
     }
 }
 
-async fn serve_asset(AxumPath(path): AxumPath<String>) -> Response {
-    WEB_APP.asset_response(&format!("/assets/{}", path))
+async fn serve_asset(
+    State(state): State<Arc<FileSharingState>>,
+    AxumPath(path): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    // axum 的 Path 已经做过 percent 解码，`..` 之类的越界由 safe_join 拦截
+    let mount = current_mount(&state).await;
+    mount
+        .response(&format!("/assets/{}", path), &headers)
+        .await
 }
 
 #[cfg(test)]
@@ -1388,6 +1446,77 @@ mod tests {
             .await
             .unwrap_or_default();
         (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn serves_web_assets_from_configured_dir() {
+        let app_dir =
+            std::env::temp_dir().join(format!("jtoolsbox-web-api-{}", uuid::Uuid::new_v4()));
+        let dir = app_dir.join("webapps").join("file-sharing");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("index.html"), "<html>from-disk</html>").unwrap();
+        std::fs::write(dir.join("assets/app.js"), "console.log('disk')").unwrap();
+
+        let state = create_shared_state(app_dir.join("data"));
+        state.set_app_dir(Some(app_dir.clone()));
+        state.refresh_web_mount();
+
+        let app = create_router(state.clone());
+
+        let index = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(index.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(index.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<html>from-disk</html>");
+
+        let js = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(js.status(), StatusCode::OK);
+
+        // 未知路径交给 SPA 兜底，仍然返回页面
+        let spa = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/some/deep/link")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(spa.status(), StatusCode::OK);
+
+        // 越界的资源路径不能被读到资源根之外
+        let traversal = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/../../config.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&app_dir).ok();
     }
 
     #[tokio::test]

@@ -1,21 +1,26 @@
 mod features;
 mod web_support;
+mod window_state;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, window::Color};
 
 use features::file_sharing;
 use file_sharing::{create_shared_state, server as fs_server, FileSharingConfig, FileSharingState};
+use window_state::{WindowState, WindowStateSaver};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     pub theme: String,
     pub close_action: String,
     pub data_root_path: Option<String>,
+    /// 主窗口上次的位置与大小。老配置没有这个字段，缺省为 None（沿用默认尺寸）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_state: Option<WindowState>,
 }
 
 impl Default for AppConfig {
@@ -24,6 +29,7 @@ impl Default for AppConfig {
             theme: "system".to_string(),
             close_action: "exit".to_string(),
             data_root_path: None,
+            window_state: None,
         }
     }
 }
@@ -69,12 +75,35 @@ fn get_config(state: tauri::State<AppState>) -> AppConfig {
 }
 
 #[tauri::command]
-fn set_config(state: tauri::State<AppState>, config: AppConfig) -> Result<(), String> {
+fn set_config(state: tauri::State<AppState>, mut config: AppConfig) -> Result<(), String> {
     {
         let mut current = state.config.lock().unwrap();
+        // 窗口几何只由后端维护：前端拿到的是启动时的快照，整段保留后端的最新值，
+        // 否则用户改个主题就会把刚移动过的窗口位置覆盖回旧值
+        config.window_state = current.window_state.clone();
         *current = config.clone();
     }
     save_config(&state.config_path, &config)
+}
+
+/// 窗口几何的落盘入口（由 window_state::WindowStateSaver 调用）
+pub(crate) fn persist_window_state(app: &AppHandle, window_state: &WindowState) {
+    let app_state = app.state::<AppState>();
+    let mut config = app_state.config.lock().unwrap();
+
+    if config
+        .window_state
+        .as_ref()
+        .map(|saved| saved.same_geometry(window_state))
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    config.window_state = Some(window_state.clone());
+    if let Err(err) = save_config(&app_state.config_path, &config) {
+        eprintln!("[JToolsBox] 保存窗口位置失败：{}", err);
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -735,6 +764,35 @@ fn handle_tray_menu(app: &AppHandle, id: &str) {
     }
 }
 
+/// 启动时的窗口 / WebView 底色，必须与 `src/styles/theme.css` 的 `--palette-bg-*` 保持一致。
+/// 窗口以 visible: false 启动（见 tauri.conf.json），前端渲染完成前露出的就是这里的颜色，
+/// 因此不会出现白色闪屏；改主背景色时这两处要一起改。
+const BOOT_BG_DARK: Color = Color(0x1e, 0x1e, 0x1e, 0xff);
+const BOOT_BG_LIGHT: Color = Color(0xf3, 0xf3, 0xf3, 0xff);
+
+/// 按配置里的主题决定启动底色；theme 为 system 时跟随窗口的实际主题
+fn boot_background_color(app: &AppHandle) -> Color {
+    let mode = app
+        .state::<AppState>()
+        .config
+        .lock()
+        .unwrap()
+        .theme
+        .clone();
+
+    let dark = match mode.as_str() {
+        "dark" => true,
+        "light" => false,
+        _ => app
+            .get_webview_window("main")
+            .and_then(|window| window.theme().ok())
+            .map(|theme| theme == tauri::Theme::Dark)
+            .unwrap_or(false),
+    };
+
+    if dark { BOOT_BG_DARK } else { BOOT_BG_LIGHT }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config_path = get_config_path();
@@ -785,8 +843,8 @@ pub fn run() {
             delete_file_sharing_log_dates,
             get_network_addresses,
         ])
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 let state = window.state::<AppState>();
                 let config = state.config.lock().unwrap();
                 if config.close_action == "hide" {
@@ -795,9 +853,71 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
+            // 拖动 / 缩放 / 跨屏缩放：几何交给去抖保存器，静默后写一次 config.json
+            tauri::WindowEvent::Moved(_)
+            | tauri::WindowEvent::Resized(_)
+            | tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(saver) = window.try_state::<std::sync::Arc<WindowStateSaver>>() {
+                    saver.queue(window);
+                }
+            }
+            _ => {}
         })
         .setup(move |app| {
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+            // 先恢复上次的窗口位置与大小（窗口还是隐藏状态，用户看不到跳变），
+            // 再启动去抖保存器接管后续的几何变化
+            let saved_window_state = app
+                .state::<AppState>()
+                .config
+                .lock()
+                .unwrap()
+                .window_state
+                .clone();
+            let mut base_window_state = saved_window_state.clone();
+            // 拿到底层 Window：几何接口都在它上面（WebviewWindow 只是包装）
+            if let Some(webview_window) = app.get_webview_window("main") {
+                let window = webview_window.as_ref().window();
+                window_state::restore(&window, saved_window_state.as_ref());
+                // 首次启动没有存档时，以默认几何作为基线，之后一启动就最大化也有还原尺寸
+                if base_window_state.is_none() {
+                    base_window_state = window_state::capture_current(&window);
+                }
+            }
+            let saver = std::sync::Arc::new(WindowStateSaver::new(base_window_state));
+            app.manage(saver.clone());
+            saver.spawn_flusher(app.handle().clone());
+
+            // 窗口以 visible: false 启动，先把底色设成当前主题色：
+            // 前端在页面加载完成后才 show()，这段空窗期露出的是主题色而不是系统默认白底
+            let boot_bg = boot_background_color(app.handle());
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_background_color(Some(boot_bg));
+            }
+
+            // 兜底：前端若因异常没能 show()，也绝不能让用户看到「启动了却没有窗口」
+            let fallback_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let timeout_secs = if cfg!(debug_assertions) { 15 } else { 5 };
+                tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
+                if let Some(window) = fallback_app.get_webview_window("main") {
+                    if window.is_visible().unwrap_or(false) {
+                        return;
+                    }
+                    eprintln!(
+                        "[JToolsBox] 前端未在 {} 秒内显示主窗口，使用兜底显示",
+                        timeout_secs
+                    );
+                    let _ = window.show();
+                }
+            });
+
+            // 网页资源以 Tauri 的 resource_dir 为准：Windows 下即 exe 所在目录，
+            // macOS 下是 .app/Contents/Resources，资源在 <resource_dir>/webapps/<功能名>/
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                fs_state_clone.set_app_dir(Some(resource_dir));
+            }
 
             let icon = app.default_window_icon().cloned();
 
@@ -862,6 +982,8 @@ pub fn run() {
             let fs_state = fs_state_clone.clone();
             let tray_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                // resource_dir 已就位，先解析一次网页资源目录（结果会写进日志）
+                fs_state.refresh_web_mount();
                 refresh_tray_menu(&tray_app, &fs_state).await;
 
                 let should_start = {
@@ -891,6 +1013,14 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 退出前把去抖中的几何补写一次：移动窗口后立刻关闭时，最后一次改动还在内存里
+            if let tauri::RunEvent::Exit = event {
+                if let Some(saver) = app.try_state::<std::sync::Arc<WindowStateSaver>>() {
+                    saver.flush(app);
+                }
+            }
+        });
 }

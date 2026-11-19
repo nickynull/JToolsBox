@@ -25,3 +25,6 @@ dist-ssr
 
 # WorkBuddy 本地协作记忆（纯个人使用，不入库）
 .workbuddy/
+
+# tauri 打包前暂存的网页资源（scripts/stage-webapps.mjs 生成）
+src-tauri/webapps/

@@ -1,6 +1,6 @@
 /* Light theme (default) */
 html[data-theme="light"] {
-  --bg-primary: #f3f3f3;
+  --bg-primary: var(--palette-bg-light);
   --bg-secondary: #ffffff;
   --bg-tertiary: #e8e8e8;
 
@@ -39,7 +39,7 @@ html[data-theme="light"] {
 
 /* Dark theme */
 html[data-theme="dark"] {
-  --bg-primary: #1e1e1e;
+  --bg-primary: var(--palette-bg-dark);
   --bg-secondary: #252526;
   --bg-tertiary: #2d2d2d;
 
@@ -125,6 +125,11 @@ html[data-theme="dark"] .el-select__wrapper {
 
 /* Global styles */
 :root {
+  /* 启动兜底色板：index.html 的首帧内联样式也引用这两个变量（并带同样的字面量兜底），
+     改主背景色时两处要一起改 */
+  --palette-bg-light: #f3f3f3;
+  --palette-bg-dark: #1e1e1e;
+
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   font-size: 14px;
@@ -140,6 +145,11 @@ body {
   padding: 0;
   background-color: var(--bg-primary);
   color: var(--text-primary);
+}
+
+/* 启动阶段不加过渡，否则主题校正时会看到 0.2s 渐变；
+   initSettings() 落定主题后才由 useSettings 给 html 加 theme-ready */
+html.theme-ready body {
   transition: background-color 0.2s ease, color 0.2s ease;
 }
 

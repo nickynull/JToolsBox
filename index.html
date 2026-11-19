@@ -6,7 +6,39 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#FFC800" />
     <title>JToolsBox</title>
+    <script>
+      // 启动首帧主题引导：必须在首次绘制前同步执行，所以不能用 module（module 默认 defer）。
+      // 存储 key 与 src/composables/useSettings.ts 的 THEME_HINT_KEY 保持一致。
+      // 这里只决定「首帧画成什么颜色」，权威主题随后由 initSettings() 校正。
+      (function () {
+        var dark = false
+        try {
+          var saved = localStorage.getItem('jtoolsbox:theme')
+          dark = saved === 'dark' || (saved !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        } catch (e) {
+          // localStorage 不可用时退回系统偏好：最差闪一次浅色，不会闪纯白
+          dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        }
+        var root = document.documentElement
+        root.setAttribute('data-theme', dark ? 'dark' : 'light')
+        // Element Plus 的暗色变量挂在 html.dark 上，需与 data-theme 同步
+        root.classList.toggle('dark', dark)
+      })()
+    </script>
     <style>
+      /* 兜底底色：即使主题变量尚未就绪，也不会出现浏览器默认白底。
+         色值与 src/styles/theme.css 的 --palette-bg-* 对应，优先取变量。 */
+      html {
+        background-color: var(--palette-bg-dark, #1e1e1e);
+      }
+      html[data-theme="light"] {
+        background-color: var(--palette-bg-light, #f3f3f3);
+        color-scheme: light;
+      }
+      /* 让滚动条、表单控件首帧就跟随主题（放在这里而不是 JS 里，避免内联样式覆盖后续主题切换） */
+      html[data-theme="dark"] {
+        color-scheme: dark;
+      }
       html, body {
         margin: 0;
         padding: 0;

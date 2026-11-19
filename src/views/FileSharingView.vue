@@ -60,7 +60,6 @@ const logKeyword = ref('')
 const showLogFilesModal = ref(false)
 const selectedLogFiles = ref<string[]>([])
 const logFilesDeleting = ref(false)
-const newFolder = ref('')
 const saving = ref(false)
 const userSaving = ref(false)
 const serverActionLoading = ref(false)
@@ -395,7 +394,7 @@ async function toggleServer() {
 
 function addSharedFolder(path: string) {
   if (fsConfig.value.shared_folders.includes(path)) {
-    notify('该文件夹已在列表中', 'error')
+    notify('该文件夹已在列表中', 'warning')
     return false
   }
   fsConfig.value.shared_folders.push(path)
@@ -411,17 +410,6 @@ async function pickFolder() {
   })
   if (selected && typeof selected === 'string') {
     addSharedFolder(selected)
-  }
-}
-
-function addFolder() {
-  const path = newFolder.value.trim()
-  if (!path) {
-    notify('请输入文件夹路径', 'error')
-    return
-  }
-  if (addSharedFolder(path)) {
-    newFolder.value = ''
   }
 }
 
@@ -680,7 +668,7 @@ onUnmounted(() => {
               <h3 class="section-title">共享文件夹</h3>
               <div class="folder-list">
                 <div v-if="fsConfig.shared_folders.length === 0" class="empty-hint">
-                  暂无共享文件夹，请添加
+                  暂无共享文件夹，点击下方按钮选择
                 </div>
                 <div v-for="(folder, i) in fsConfig.shared_folders" :key="i" class="folder-item">
                   <span class="folder-path">{{ folder }}</span>
@@ -699,12 +687,11 @@ onUnmounted(() => {
                 </div>
               </div>
               <div class="folder-add">
-                <el-input v-model="newFolder" placeholder="输入文件夹路径，如 D:\Shared" @keydown.enter="addFolder" />
-                <el-button @click="addFolder">添加</el-button>
-                <el-button title="浏览文件夹" @click="pickFolder">
+                <el-button type="primary" plain @click="pickFolder">
                   <el-icon :size="14">
                     <Folder />
                   </el-icon>
+                  添加共享文件夹
                 </el-button>
               </div>
             </section>
@@ -1155,14 +1142,6 @@ onUnmounted(() => {
 .folder-add {
   display: flex;
   gap: 8px;
-}
-
-.folder-add .el-input {
-  flex: 1;
-}
-
-.folder-add .el-button+.el-button {
-  margin-left: 0;
 }
 
 .role-select {

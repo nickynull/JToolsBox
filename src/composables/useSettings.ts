@@ -4,10 +4,24 @@ import { invoke } from '@tauri-apps/api/core'
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type CloseAction = 'hide' | 'exit'
 
+/** 主窗口上次的位置与大小，由 Rust 侧独占维护（前端只做结构对齐，不读也不写） */
+export interface WindowState {
+  /** 逻辑像素 */
+  width: number
+  /** 逻辑像素 */
+  height: number
+  /** 物理像素（屏幕坐标） */
+  x: number
+  /** 物理像素（屏幕坐标） */
+  y: number
+  maximized: boolean
+}
+
 export interface AppConfig {
   theme: ThemeMode
   close_action: CloseAction
   data_root_path: string | null
+  window_state?: WindowState | null
 }
 
 export interface FileSharingConfig {
@@ -57,6 +71,12 @@ const config = ref<AppConfig>({
   data_root_path: null,
 })
 
+/**
+ * 首帧主题提示的存储 key：index.html 的内联引导脚本也读这个 key，
+ * 两处必须保持一致。它只是「上次实际呈现的主题」的缓存，权威值始终是 config.json。
+ */
+const THEME_HINT_KEY = 'jtoolsbox:theme'
+
 const resolvedTheme = ref<'light' | 'dark'>('light')
 
 let initialized = false
@@ -76,6 +96,13 @@ function applyTheme(theme: 'light' | 'dark') {
   // Element Plus 的暗色变量挂在 html.dark 上，需要与 data-theme 同步
   root.classList.toggle('dark', theme === 'dark')
   resolvedTheme.value = theme
+
+  // 写回首帧提示：用户选了深色但系统是浅色时，下次启动才不会先浅后深
+  try {
+    localStorage.setItem(THEME_HINT_KEY, theme)
+  } catch {
+    // 存储不可用只影响下次启动的首帧观感，不影响本次主题
+  }
 }
 
 function resolveAndApplyTheme() {
@@ -95,6 +122,11 @@ export async function initSettings() {
   }
 
   resolveAndApplyTheme()
+
+  // 主题已落定为权威值，下一帧再启用颜色过渡，避免启动阶段出现渐变
+  requestAnimationFrame(() => {
+    document.documentElement.classList.add('theme-ready')
+  })
 
   mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
   mediaHandler = () => {
